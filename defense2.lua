@@ -11,8 +11,11 @@
          的参数全部丢失）。
       3) 塔的对应关系：录制用"放塔顺序队列"，回放用"放塔前后快照对比"，
          消除"塔还没生成就记 ID"的竞态。
-      4) 录制时额外记录 Cost（这次动作实际扣了多少钱），
-         这是极速模式能"踩着钱"放塔的前提。
+      4) 录制时记录 Cost（这次动作实际扣了多少钱），这是极速模式能
+         "踩着钱"放塔的前提。花费不是用"动作前-动作后"相减算的
+         （打怪收入会污染），而是记录现金的每一次跳变，只把"向下的
+         跳变"按时间归给最近的动作。回放时如果仍被服务器拒单，会自动
+         抬高阈值重试，并把学到的真实花费写回宏文件。
       5) 新增【极速模式】：用 Cost 而不是 CashBefore 作为放行条件，
          钱一到就发；去掉固定的 0.05 秒间隔，改成逐帧轮询。
       6) 状态栏刷新节流（旧版等钱时每 0.01 秒刷一次 UI，本身就很卡）。
@@ -36,7 +39,7 @@ local CONFIG = {
     RETRY_MAX_UPGRADE  = 2,                  -- 升级失败重试次数
     RETRY_DELAY        = 0.12,               -- 重试间隔
     TURBO_MARGIN       = 0,                  -- 极速模式额外安全金额
-    COST_WINDOW        = 0.45,               -- 录制时采样花费的窗口(秒)
+    COST_MATCH_WINDOW  = 3.0,                -- 扣钱事件最多回溯多久算到某个动作上(秒)
     SPEND_CHECK_TIME   = 1.2,                -- 极速升级后确认扣钱的窗口(秒)
     STATUS_GAP         = 0.15,               -- 状态栏最小刷新间隔
     DEBUG              = false,              -- true 时打印 hook 错误
@@ -189,6 +192,28 @@ end
 -- ==========================================================
 local Cash = {value = 0, source = nil, conn = nil}
 
+-- 现金变化日志：每一次"跳变"都记一条。分析花费时只看负跳变，
+-- 打死怪加的钱是正跳变，天然不会干扰。
+local cashLog = {}
+local CASH_LOG_MAX = 600
+
+local function setCashValue(v)
+    v = tonumber(v)
+    if not v then return end
+    if v == Cash.value then return end
+    Cash.value = v
+    local n = #cashLog + 1
+    cashLog[n] = {t = os.clock(), v = v}
+    if n > CASH_LOG_MAX then table.remove(cashLog, 1) end
+end
+
+local function clearCashLog()
+    for i = #cashLog, 1, -1 do cashLog[i] = nil end
+    -- 先垫一条当前值，这样第一次花钱也能算出"下跌了多少"
+    cashLog[1] = {t = os.clock(), v = Cash.value}
+end
+
+
 local CASH_WORDS = {"cash", "money", "coin", "gold", "credit"}
 
 local function isCashName(name)
@@ -223,16 +248,14 @@ local function bindCashSource(obj)
     Cash.source = obj
 
     if obj:IsA("TextLabel") then
-        local v = parseCashText(obj.Text)
-        if v then Cash.value = v end
+        setCashValue(parseCashText(obj.Text))
         Cash.conn = obj:GetPropertyChangedSignal("Text"):Connect(function()
-            local n = parseCashText(obj.Text)
-            if n then Cash.value = n end
+            setCashValue(parseCashText(obj.Text))
         end)
     else
-        Cash.value = obj.Value
+        setCashValue(obj.Value)
         Cash.conn = obj:GetPropertyChangedSignal("Value"):Connect(function()
-            Cash.value = obj.Value
+            setCashValue(obj.Value)
         end)
     end
 end
@@ -288,10 +311,9 @@ task.spawn(function()
         local src = Cash.source
         if src and src.Parent then
             if src:IsA("TextLabel") then
-                local n = parseCashText(src.Text)
-                if n then Cash.value = n end
+                setCashValue(parseCashText(src.Text))
             else
-                Cash.value = src.Value
+                setCashValue(src.Value)
             end
         end
         task.wait(CONFIG.CASH_POLL)
@@ -519,6 +541,26 @@ local function runAction(act, idx, total, ctx)
         need = getRequiredCash(act)
     end
 
+    -- 极速模式用的是"估算花费"，估算偏低时服务器会拒单。
+    -- 这里失败一次就把阈值往上抬，最多抬回录制时的余额（等于退回标准模式），
+    -- 抬过之后成功的那次会被写回宏里，下次直接就是准的。
+    local cap = act.CashBefore or need
+    local usingCost = turboMode and type(act.Cost) == "number" and act.Cost > 0
+    local learned = nil
+
+    local function bumpNeed()
+        if not usingCost or need >= cap then return end
+        need = math.min(cap, math.max(need * 1.6, need + 80))
+        learned = need
+    end
+
+    local function persistLearned()
+        if learned and act.Cost and learned > act.Cost then
+            act.Cost = learned
+            ctx.costDirty = true
+        end
+    end
+
     local maxAttempt = 1
     if isPlace then
         maxAttempt = CONFIG.RETRY_MAX_PLACE
@@ -555,6 +597,7 @@ local function runAction(act, idx, total, ctx)
         if not callOK then
             if isPlace and not folder then unqueuePending(pendingPlaces, act.MacroID) end
             setStatus(string.format("状态: 🔴 [%d/%d] 调用出错: %s", idx, total, tostring(callErr)))
+            bumpNeed()
             task.wait(CONFIG.RETRY_DELAY)
 
         elseif isPlace then
@@ -568,18 +611,22 @@ local function runAction(act, idx, total, ctx)
             end
 
             if tower then
+                persistLearned()
                 setStatus(string.format("状态: 🟢 [%d/%d] 放置成功", idx, total))
                 return "ok"
             end
             setStatus(string.format("状态: 🟠 [%d/%d] 塔未生成，重试", idx, total))
+            bumpNeed()
             task.wait(CONFIG.RETRY_DELAY)
 
         elseif isUpgrade and turboMode and type(act.Cost) == "number" and act.Cost > 0 then
             -- 极速是踩着余额发的，这里确认钱确实扣了，避免服务器拒单后整段错位
             if waitCashSpend(cashBeforeCall, act.Cost * 0.5, CONFIG.SPEND_CHECK_TIME) then
+                persistLearned()
                 return "ok"
             end
             setStatus(string.format("状态: 🟠 [%d/%d] 升级可能失败，重试", idx, total))
+            bumpNeed()
             task.wait(CONFIG.RETRY_DELAY)
 
         else
@@ -604,6 +651,7 @@ local function startPlayback()
         local ctx = {
             playMap = {},
             pendingPlaces = {},
+            costDirty = false,
         }
 
         local conn = attachTowerAdded(function(obj)
@@ -625,6 +673,12 @@ local function startPlayback()
         end
 
         if conn then pcall(function() conn:Disconnect() end) end
+
+        -- 把这次回放里学到的真实花费写回宏文件
+        if ctx.costDirty and currentMacroName then
+            pcall(function() saveMacro(currentMacroName, recordings) end)
+        end
+
         if isPlaying then stopPlayback() end
     end)
 end
@@ -632,25 +686,48 @@ end
 -- ==========================================================
 -- 7. 录制 Hook（安全版）
 -- ==========================================================
-local costSamplerBusy = false
+-- 关键：花费不再用"动作前 - 动作后"直接相减。
+-- 塔防里打死怪会随时加钱，相减会把收入抵掉，估出来的花费偏小。
+-- 新做法：
+--   1) 现金每跳变一次就记一条 (时间, 数值)；
+--   2) 只有"向下的跳变"才可能是花钱，向上的跳变（打怪收入）直接忽略；
+--   3) 每笔下降按时间归给"它之前最近的那个动作"，同一动作取最大的一笔。
+-- 这样收入再多也不会污染花费，除非收入和扣费被服务器合并成同一次更新。
+local function finalizeCosts()
+    local best = {}
 
-local function scheduleCostSample(rec, baseCash)
-    if costSamplerBusy then return end
-    costSamplerBusy = true
-    task.spawn(function()
-        local t0 = os.clock()
-        local minCash = baseCash
-        while os.clock() - t0 < CONFIG.COST_WINDOW do
-            if Cash.value < minCash then minCash = Cash.value end
-            task.wait()
+    local prev = nil
+    for _, e in ipairs(cashLog) do
+        if prev then
+            local drop = prev - e.v
+            if drop > 0 then
+                local owner = nil
+                for i = #recordings, 1, -1 do
+                    local r = recordings[i]
+                    if r.T0 and r.T0 <= e.t and (e.t - r.T0) <= CONFIG.COST_MATCH_WINDOW then
+                        owner = i
+                        break
+                    end
+                end
+                if owner and (not best[owner] or drop > best[owner]) then
+                    best[owner] = drop
+                end
+            end
+            prev = e.v
+        else
+            prev = e.v
         end
-        costSamplerBusy = false
-        local cost = baseCash - minCash
-        if cost > 0 then
-            rec.Cost = cost
-            rec.CashAfter = minCash
+    end
+
+    for i, rec in ipairs(recordings) do
+        if rec.T0 ~= nil then
+            local drop = best[i]
+            if drop and drop > 0 then
+                rec.Cost = math.floor(drop + 0.5)
+            end
+            rec.T0 = nil   -- 时间戳只在本次录制里有意义，不写进存档
         end
-    end)
+    end
 end
 
 local function isRecordable(name)
@@ -669,6 +746,7 @@ local function handleRecordCall(self, method, ...)
 
     local packed = table.pack(...)
     local cashBefore = Cash.value
+    local t0 = os.clock()
     local isPlace = string.find(name, "Place", 1, true) ~= nil
     local isSell = string.find(name, "Sell", 1, true) ~= nil
 
@@ -711,8 +789,9 @@ local function handleRecordCall(self, method, ...)
 
     table.insert(recordings, rec)
 
+    -- 记下动作时刻，停止录制时统一把"负跳变"归到各个动作上算花费
     if not isSell then
-        scheduleCostSample(rec, cashBefore)
+        rec.T0 = t0
     end
 
     local count = #recordings
@@ -852,11 +931,13 @@ recordToggle = MainTab:Toggle({
             MacroIDCounter = 0
             ActionIDCounter = 0
             recordPlaceQueue = {}
+            clearCashLog()
             for k in pairs(instanceToMacroID) do instanceToMacroID[k] = nil end
             attachRecordTowerListener()
             setStatus("状态: 🔴 正在录制中...", true)
         else
             isRecording = false
+            finalizeCosts()
             setStatus("状态: 保存成功，共 " .. #recordings .. " 个动作", true)
             if currentMacroName then
                 allMacrosData[currentMacroName] = recordings
