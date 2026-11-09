@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v3.2 (精准适配新的投票UI路径)
+-- 随机塔防 宏录制/回放 v4.0 (彻底重置状态版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -181,7 +181,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 3.2",
+    Title = "塔防宏 4.0",
     Author = "Macro + Memory",
     Icon = "shield",
     Background = "rbxassetid://79176013131678", 
@@ -533,24 +533,35 @@ if itemDropsFolder then
     end)
 end
 
---==================== 自动化循环 ====================
+--==================== 自动化循环 (生命周期版) ====================
 task.spawn(function()
     local firedRound = false
-    local lastReady, lastRejoin = 0, 0
+    local lastVote, lastReady, lastRejoin = 0, 0, 0
     local hasSentReady = false 
     
     local voteCooldown = 0     
-    local lastVoteCheck = 0    
 
     while true do
         task.wait(0.2)
         if not isRecording then
             local now = os.clock()
             
-            -- 1. 自动投票逻辑（带3秒检测 + 30秒休眠机制，精准匹配 1Diff 路径）
+            -- 1. 自动重开：一旦发送重开，立刻把所有局内状态清空，防止带到下一局
+            if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
+                lastRejoin = now
+                pcall(function() ResultsAction:FireServer("Rejoin") end)
+                
+                -- 【彻底重置生命周期】
+                hasSentReady = false
+                voteCooldown = 0
+                firedRound = false
+                log("🔄 已发送重开，所有状态清零重置")
+            end
+
+            -- 2. 自动投票逻辑 (带3秒检测 + 30秒休眠)
             if autoVote and CastDifficultyVote then
-                if now >= voteCooldown and now - lastVoteCheck >= 3 then
-                    lastVoteCheck = now
+                if now >= voteCooldown and now - lastVote >= 3 then
+                    lastVote = now
                     
                     local coreGui = playerGui:FindFirstChild("CoreGui")
                     local diffSelect = coreGui and coreGui:FindFirstChild("DifficultySelect")
@@ -558,21 +569,11 @@ task.spawn(function()
                     local diff1 = holder and holder:FindFirstChild("1Diff")
                     
                     if diff1 and isVisibleDeep(diff1) then
-                        -- 发现了面板！立刻投票
                         pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
-                        log("⭐ 发现 DifficultySelect 面板，已投票，进入30秒休眠")
-                        
+                        log("⭐ 发现面板，已投票，30秒冷却")
                         voteCooldown = now + 30 
                     end
                 end
-            end
-
-            -- 2. 自动重开
-            if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
-                lastRejoin = now
-                pcall(function() ResultsAction:FireServer("Rejoin") end)
-                hasSentReady = false 
-                voteCooldown = 0 
             end
 
             -- 3. 准备界面处理
@@ -584,7 +585,7 @@ task.spawn(function()
                     hasSentReady = true
                     if ReadyUp then
                         pcall(function() ReadyUp:FireServer() end)
-                        log("✅ 已发送 ReadyUp 准备完成信号")
+                        log("✅ 已发送 ReadyUp")
                     end
                 end
                 
