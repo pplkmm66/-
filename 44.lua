@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v2.7 (完美 UI 背景收尾版)
+-- 随机塔防 宏录制/回放 v2.9 (修复跨局自动投票 + 完美 UI)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -180,15 +180,12 @@ task.spawn(function()
 end)
 
 --==================== UI ====================
--- 【核心修复】：不再全屏，把背景图 ID 直接交给 WindUI 处理
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 2.7",
+    Title = "塔防宏 2.9",
     Author = "Macro + Memory",
     Icon = "shield",
-    
-    -- 原生背景图，只在UI框内部生效
     Background = "rbxassetid://79176013131678", 
-    BackgroundImageTransparency = 0.3, -- 透明度，保证看字清晰
+    BackgroundImageTransparency = 0.3, 
     Transparent = true,
 })
 
@@ -316,7 +313,7 @@ local diffDropdown = AutoTab:Dropdown({
 selectedDifficulty = diffDropdown.Value
 
 AutoTab:Toggle({
-    Title = "自动点准备 (ReadyButton)",
+    Title = "自动点准备 (ReadyUp)",
     Value = savedData.autoReady or false,
     Callback = function(v) autoReady = v; saveSettings() end,
 })
@@ -540,30 +537,52 @@ end
 task.spawn(function()
     local firedRound = false
     local lastVote, lastReady, lastRejoin = 0, 0, 0
+    local hasSentReady = false 
+    
+    local wasInGame = false -- 新增：记录上一秒是不是在游戏局内
 
     while true do
         task.wait(0.2)
         if not isRecording then
             local now = os.clock()
+            
+            -- 检测是否离开了准备/投票界面，进入了游戏内
+            local frame = findByName(playerGui, "ReadyFrame")
+            local isReadyUIOpen = frame and isVisibleDeep(frame)
+
+            -- 如果我们之前不在游戏里，现在也不在准备UI，说明我们刚进新局，必须立刻重置投票CD！
+            if wasInGame and not isReadyUIOpen then
+                lastVote = 0 
+                hasSentReady = false
+                wasInGame = false
+            end
+
+            -- 自动投票（如果CD重置了，它会立刻投出）
             if autoVote and CastDifficultyVote and now - lastVote >= 1 then
                 lastVote = now
                 pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
             end
+
+            -- 自动重开
             if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
                 lastRejoin = now
                 pcall(function() ResultsAction:FireServer("Rejoin") end)
+                hasSentReady = false 
+                wasInGame = true -- 标记我们准备重开了
             end
 
-            local frame = findByName(playerGui, "ReadyFrame")
-            if frame and isVisibleDeep(frame) then
-                if autoReady and now - lastReady >= 1 then
-                    lastReady = now
-                    local btn = frame:FindFirstChild("ReadyButton", true)
-                    if btn and btn:IsA("TextButton") and isVisibleDeep(btn) then
-                        local ok = pcall(function() firesignal(btn.MouseButton1Click) end)
-                        if not ok and ReadyUp then pcall(function() ReadyUp:FireServer() end) end
+            -- 准备界面处理
+            if isReadyUIOpen then
+                wasInGame = false
+                
+                if autoReady and not hasSentReady then
+                    hasSentReady = true
+                    if ReadyUp then
+                        pcall(function() ReadyUp:FireServer() end)
+                        log("✅ 已发送 ReadyUp 准备完成信号")
                     end
                 end
+                
                 if autoPlayOnReady and not firedRound then
                     firedRound = true
                     setStatus(("状态: 🟢 ReadyFrame 出现，%.1f 秒后回放"):format(replayDelay))
