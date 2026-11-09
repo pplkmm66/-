@@ -1,16 +1,12 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v2.0
--- 核心规则：
---   1) 放塔第4参 UUID 客户端随便生成即可，服务端不校验
---   2) 第5参时间戳必须「发包那一刻」现取 workspace:GetServerTimeNow()
---   3) RequestPlacement 返回的 string 才是真实塔 UUID，升级/卖塔必须用它
---   4) 旧真实UUID -> 本局新真实UUID 的映射在回放时实时建立
+-- 随机塔防 宏录制/回放 v2.3 (带自动捡道具 + 美化背景)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
 local HttpService = game:GetService("HttpService")
 local Players     = game:GetService("Players")
 local RS          = game:GetService("ReplicatedStorage")
+local Workspace   = game:GetService("Workspace")
 local player      = Players.LocalPlayer
 local playerGui   = player:WaitForChild("PlayerGui")
 
@@ -25,6 +21,7 @@ local RequestTowerUpgrade = Functions and Functions:WaitForChild("RequestTowerUp
 local RequestTowerSell    = Functions and Functions:WaitForChild("RequestTowerSell", 30)
 local CastDifficultyVote  = Events and Events:WaitForChild("CastDifficultyVote", 30)
 local ReadyUp             = Events and Events:WaitForChild("ReadyUp", 30)
+local ResultsAction       = Events and Events:WaitForChild("ResultsAction", 30)
 
 --==================== 状态 ====================
 local currentMacroName = nil
@@ -44,14 +41,16 @@ local lastDbRefresh    = 0
 local autoVote           = false
 local autoReady          = false
 local autoPlayOnReady    = false
+local autoRejoin         = false
+local autoPickItem       = false 
 local replayDelay        = 3
 local selectedDifficulty = "Medium"
 
-local CASH_WAIT_MAX = 25   -- 单个动作最多等钱秒数
-local PLACE_RETRY   = 2    -- 放塔失败重试次数
-local ACTION_GAP    = 0.08 -- 动作间隔
+local CASH_WAIT_MAX = 25   
+local PLACE_RETRY   = 2    
+local ACTION_GAP    = 0.08 
 
-local startPlayback, stopPlayback   -- 前向声明
+local startPlayback, stopPlayback   
 
 --==================== 工具 ====================
 local function guid()
@@ -151,10 +150,34 @@ task.spawn(function()
     end
 end)
 
+--==================== 背景贴图挂载 ====================
+local bgGui = Instance.new("ScreenGui")
+bgGui.Name = "CustomBackgroundGui"
+bgGui.ResetOnSpawn = false
+bgGui.DisplayOrder = -1 
+bgGui.IgnoreGuiInset = true
+bgGui.Parent = playerGui
+
+local bgImage = Instance.new("ImageLabel")
+bgImage.Size = UDim2.new(1, 0, 1, 0) 
+bgImage.BackgroundTransparency = 1
+bgImage.ScaleType = Enum.ScaleType.Crop
+bgImage.Image = "rbxassetid://79176013131678" 
+bgImage.ImageTransparency = 0.2 
+bgImage.Parent = bgGui
+
+-- 可选：一层薄薄的黑纱，压暗背景，让 WindUI 的白字更清晰
+local bgOverlay = Instance.new("Frame")
+bgOverlay.Size = UDim2.new(1, 0, 1, 0)
+bgOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+bgOverlay.BackgroundTransparency = 0.5
+bgOverlay.BorderSizePixel = 0
+bgOverlay.Parent = bgGui
+
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 2.0",
-    Author = "Macro",
+    Title = "塔防宏 2.3",
+    Author = "Macro + Auto Pick",
     Icon = "shield",
     Transparent = true,
 })
@@ -281,6 +304,18 @@ AutoTab:Toggle({
     Callback = function(v) autoPlayOnReady = v end,
 })
 
+AutoTab:Toggle({
+    Title = "打完后自动重开下一局",
+    Value = false,
+    Callback = function(v) autoRejoin = v end,
+})
+
+AutoTab:Toggle({
+    Title = "自动瞬移捡道具",
+    Value = false,
+    Callback = function(v) autoPickItem = v end,
+})
+
 AutoTab:Input({
     Title = "回放延迟（秒）",
     Placeholder = "3",
@@ -327,7 +362,7 @@ DbgTab:Button({
             return
         end
         local uid = guid()
-        local ts  = workspace:GetServerTimeNow()
+        local ts  = Workspace:GetServerTimeNow()
         local ok, ret = pcall(function()
             return RequestPlacement:InvokeServer(act.tower,
                 Vector3.new(act.pos[1], act.pos[2], act.pos[3]), act.rot or 0, uid, ts)
@@ -362,7 +397,6 @@ local function installHook()
 
         if name == "RequestPlacement" then
             local a1, a2, a3 = ...
-            -- 先放行真实调用，拿到服务端返回的真实塔 UUID（这是唯一正确来源）
             local results = table.pack(oldNamecall(self, ...))
             local realUid = results[1]
 
@@ -372,7 +406,7 @@ local function installHook()
                     tower   = tostring(a1),
                     pos     = { a2.X, a2.Y, a2.Z },
                     rot     = tonumber(a3) or 0,
-                    realUid = realUid,        -- ★ 服务端真实塔 UUID
+                    realUid = realUid, 
                     cash    = liveCash,
                 })
                 setStatus(("状态: 🔴 已录放塔 (%d)"):format(#recordings))
@@ -386,7 +420,7 @@ local function installHook()
             local a1 = ...
             table.insert(recordings, {
                 kind = (name == "RequestTowerUpgrade") and "upgrade" or "sell",
-                uid  = tostring(a1),          -- 真实塔 UUID
+                uid  = tostring(a1), 
                 cash = liveCash,
             })
             setStatus(("状态: 🔴 已录动作 (%d)"):format(#recordings))
@@ -404,7 +438,7 @@ end
 --==================== 回放 ====================
 local function placeOnce(act)
     local uid = guid()
-    local ts  = workspace:GetServerTimeNow()      -- ★ 必须紧贴发包，不能提前算
+    local ts  = Workspace:GetServerTimeNow() 
     local ok, ret = pcall(function()
         return RequestPlacement:InvokeServer(
             act.tower,
@@ -423,7 +457,7 @@ local function runTowerAction(act, failedUid)
     if not act.uid then return false, "skip" end
     if failedUid[act.uid] then return false, "skip" end
     local target = uidMap[act.uid]
-    if not target then return false, "skip" end       -- 该塔本局没放下，跳过后续操作
+    if not target then return false, "skip" end 
     local remote = (act.kind == "upgrade") and RequestTowerUpgrade or RequestTowerSell
     if not remote then return false, "no remote" end
     local ok, ret = pcall(function() return remote:InvokeServer(target) end)
@@ -469,7 +503,6 @@ function startPlayback()
         for i, act in ipairs(recordings) do
             if not isPlaying then break end
 
-            -- 等钱：时间戳在真正发包时才取，这里的等待不影响校验
             if act.cash and act.cash > 0 then
                 local deadline = os.clock() + CASH_WAIT_MAX
                 while isPlaying and liveCash < act.cash and os.clock() < deadline do
@@ -489,7 +522,7 @@ function startPlayback()
                 end
                 if ok then
                     okN = okN + 1
-                    if act.realUid then uidMap[act.realUid] = ret end   -- ★ 建立映射
+                    if act.realUid then uidMap[act.realUid] = ret end
                     setStatus(("🟢 放塔 %d/%d [%s]"):format(i, #recordings, act.tower))
                     log(("放塔 %d/%d %s -> %s"):format(i, #recordings, act.tower, ret))
                 else
@@ -533,6 +566,43 @@ function stopPlayback()
     log("回放已手动停止")
 end
 
+--==================== 自动捡道具监听器 ====================
+Workspace:WaitForChild("ItemDrops", 10)
+local itemDropsFolder = Workspace:FindFirstChild("ItemDrops")
+
+if itemDropsFolder then
+    itemDropsFolder.DescendantAdded:Connect(function(item)
+        if not autoPickItem then return end
+        if item:IsA("Model") then
+            task.wait(0.1)
+            if not autoPickItem or not item.Parent then return end
+            
+            local targetPos = nil
+            if item.PrimaryPart then
+                targetPos = item.PrimaryPart.Position
+            else
+                local success, pivot = pcall(function() return item:GetPivot().Position end)
+                if success then targetPos = pivot end
+            end
+
+            if targetPos then
+                local char = player.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local returnPos = hrp.CFrame
+                    hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
+                    log(("⭐ 发现道具，已瞬移拾取"))
+                    task.wait(0.3)
+                    if autoPickItem and hrp and hrp.Parent then
+                        hrp.CFrame = returnPos
+                    end
+                end
+            end
+        end
+    end)
+    log("✅ 自动捡道具服务已挂载")
+end
+
 --==================== ReadyFrame 触发 + 自动化 ====================
 local function getReadyFrame()
     if readyFrameRef and readyFrameRef.Parent and readyFrameRef:IsDescendantOf(playerGui) then
@@ -544,7 +614,7 @@ end
 
 task.spawn(function()
     local firedRound = false
-    local lastVote, lastReady = 0, 0
+    local lastVote, lastReady, lastRejoin = 0, 0, 0
 
     while true do
         task.wait(0.2)
@@ -554,16 +624,19 @@ task.spawn(function()
         else
             local now = os.clock()
 
-            -- 自动投票（1 秒最多一次，别刷太快）
             if autoVote and CastDifficultyVote and now - lastVote >= 1 then
                 lastVote = now
                 pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
+            end
+            
+            if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
+                lastRejoin = now
+                pcall(function() ResultsAction:FireServer("Rejoin") end)
             end
 
             local frame = getReadyFrame()
             local frameVisible = frame ~= nil and frame.Parent ~= nil and isVisibleDeep(frame)
             if frameVisible then
-                -- 自动点准备
                 if autoReady and now - lastReady >= 1 then
                     lastReady = now
                     local btn = frame:FindFirstChild("ReadyButton", true)
@@ -575,7 +648,6 @@ task.spawn(function()
                     end
                 end
 
-                -- 自动回放
                 if autoPlayOnReady and not firedRound then
                     firedRound = true
                     setStatus(("状态: 🟢 检测到 ReadyFrame，%.1f 秒后回放"):format(replayDelay))
@@ -597,11 +669,3 @@ end)
 installHook()
 setStatus("状态: 就绪（先选宏 → 录制 → 回放）")
 log("脚本加载完成")
-
--- 方便手动调用/调试
-getgenv().TD2Macro = {
-    start = function() startPlayback() end,
-    stop = function() stopPlayback() end,
-    dump = function() return recordings end,
-    cash = function() return liveCash end,
-}
