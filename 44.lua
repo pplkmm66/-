@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v3.1 (带投票防刷屏冷却)
+-- 随机塔防 宏录制/回放 v3.2 (精准适配新的投票UI路径)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -181,7 +181,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 3.1",
+    Title = "塔防宏 3.2",
     Author = "Macro + Memory",
     Icon = "shield",
     Background = "rbxassetid://79176013131678", 
@@ -536,36 +536,33 @@ end
 --==================== 自动化循环 ====================
 task.spawn(function()
     local firedRound = false
-    local lastVote, lastReady, lastRejoin = 0, 0, 0
+    local lastReady, lastRejoin = 0, 0
     local hasSentReady = false 
     
-    -- 【核心修改】：投票检测锁定状态
-    local voteCooldown = 0     -- 记录冷却结束的时间戳
-    local lastVoteCheck = 0    -- 记录上次检测的时间戳
+    local voteCooldown = 0     
+    local lastVoteCheck = 0    
 
     while true do
         task.wait(0.2)
         if not isRecording then
             local now = os.clock()
             
-            -- 1. 自动投票逻辑（带3秒检测 + 30秒休眠机制）
+            -- 1. 自动投票逻辑（带3秒检测 + 30秒休眠机制，精准匹配 1Diff 路径）
             if autoVote and CastDifficultyVote then
-                -- 如果冷却时间已过，去检测面板
                 if now >= voteCooldown and now - lastVoteCheck >= 3 then
                     lastVoteCheck = now
                     
                     local coreGui = playerGui:FindFirstChild("CoreGui")
-                    local diffOverlay = coreGui and coreGui:FindFirstChild("DifficultyOverlay")
-                    local votePanel = diffOverlay and diffOverlay:FindFirstChild("VotePanel")
+                    local diffSelect = coreGui and coreGui:FindFirstChild("DifficultySelect")
+                    local holder = diffSelect and diffSelect:FindFirstChild("Holder")
+                    local diff1 = holder and holder:FindFirstChild("1Diff")
                     
-                    if votePanel and isVisibleDeep(votePanel) then
+                    if diff1 and isVisibleDeep(diff1) then
                         -- 发现了面板！立刻投票
                         pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
-                        log("⭐ 发现投票面板，已投票，进入30秒休眠")
+                        log("⭐ 发现 DifficultySelect 面板，已投票，进入30秒休眠")
                         
-                        -- 锁定30秒内不再检测和投票
                         voteCooldown = now + 30 
-                        lastVote = now
                     end
                 end
             end
@@ -575,7 +572,7 @@ task.spawn(function()
                 lastRejoin = now
                 pcall(function() ResultsAction:FireServer("Rejoin") end)
                 hasSentReady = false 
-                voteCooldown = 0 -- 重开新局，解除投票冷却
+                voteCooldown = 0 
             end
 
             -- 3. 准备界面处理
