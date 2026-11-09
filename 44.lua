@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v2.5 (完美内嵌背景 + 记忆 + 捡道具)
+-- 随机塔防 宏录制/回放 v2.6 (完美内嵌背景修复版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -179,14 +179,37 @@ task.spawn(function()
     end
 end)
 
---==================== UI (完美内嵌背景) ====================
+--==================== 背景物理贴图层 ====================
+-- 【核心修复】：物理创建背景层，跟随 UI 层级，绝不越界遮挡游戏
+local bgGui = Instance.new("ScreenGui")
+bgGui.Name = "CustomBackgroundGui"
+bgGui.ResetOnSpawn = false
+bgGui.DisplayOrder = -1 -- 放在最底层
+bgGui.IgnoreGuiInset = true
+bgGui.Parent = playerGui
+
+local bgImage = Instance.new("ImageLabel")
+bgImage.Size = UDim2.new(1, 0, 1, 0) 
+bgImage.BackgroundTransparency = 1
+bgImage.ScaleType = Enum.ScaleType.Crop
+bgImage.Image = "rbxassetid://79176013131678" 
+bgImage.ImageTransparency = 0.2 
+bgImage.Parent = bgGui
+
+-- 加一层半透明遮罩，保证白字清晰
+local bgOverlay = Instance.new("Frame")
+bgOverlay.Size = UDim2.new(1, 0, 1, 0)
+bgOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+bgOverlay.BackgroundTransparency = 0.5
+bgOverlay.BorderSizePixel = 0
+bgOverlay.Parent = bgGui
+
+--==================== UI ====================
+-- 使用无背景的纯透明 UI 叠在上层
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 2.5",
+    Title = "塔防宏 2.6",
     Author = "Macro + Memory",
     Icon = "shield",
-    -- ★ 核心修改：把图片填入 WindUI 内部，不再全屏铺
-    Background = "rbxassetid://79176013131678", 
-    BackgroundImageTransparency = 0.3, -- 图片透明一点，看清字
     Transparent = true,
 })
 
