@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v2.3 (带自动捡道具 + 美化背景)
+-- 随机塔防 宏录制/回放 v2.4 (带背景 + 自动捡道具 + 状态记忆)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -11,6 +11,7 @@ local player      = Players.LocalPlayer
 local playerGui   = player:WaitForChild("PlayerGui")
 
 local SAVE_FOLDER = "TD2_Macro_Data"
+local CONFIG_FILE = "TD2_Macro_Data/config.json" -- ★ 新增：状态保存文件
 
 --==================== Remotes ====================
 local Remotes             = RS:WaitForChild("Remotes", 30)
@@ -38,6 +39,7 @@ local dbLines          = {}
 local dbgParagraph     = nil
 local lastDbRefresh    = 0
 
+-- 自动化状态 (带默认值)
 local autoVote           = false
 local autoReady          = false
 local autoPlayOnReady    = false
@@ -45,6 +47,7 @@ local autoRejoin         = false
 local autoPickItem       = false 
 local replayDelay        = 3
 local selectedDifficulty = "Medium"
+local autoPickItem       = false
 
 local CASH_WAIT_MAX = 25   
 local PLACE_RETRY   = 2    
@@ -110,7 +113,7 @@ local function log(msg)
     end
 end
 
---==================== 存档 ====================
+--==================== 存档 & 状态记忆 ====================
 pcall(function()
     if not isfolder(SAVE_FOLDER) then makefolder(SAVE_FOLDER) end
 end)
@@ -120,7 +123,7 @@ local function loadAllMacros()
     pcall(function()
         for _, file in ipairs(listfiles(SAVE_FOLDER)) do
             local name = file:match("([^/\\]+)%.json$")
-            if name then
+            if name and name ~= "config" then -- ★ 排除配置文件
                 table.insert(names, name)
                 local ok, data = pcall(function()
                     return HttpService:JSONDecode(readfile(file))
@@ -133,13 +136,43 @@ local function loadAllMacros()
 end
 
 local function saveCurrentMacro()
-    if not currentMacroName then return end
+    if not currentMacroName or currentMacroName == "新建宏..." then return end
     allMacrosData[currentMacroName] = recordings
     pcall(function()
-        writefile(SAVE_FOLDER .. "/" .. currentMacroName .. ".json",
-            HttpService:JSONEncode(recordings))
+        writefile(SAVE_FOLDER .. "/" .. currentMacroName .. ".json", HttpService:JSONEncode(recordings))
     end)
 end
+
+-- ★ 读取上次的 UI 状态
+local function loadSettings()
+    local settings = {}
+    pcall(function()
+        if isfile(CONFIG_FILE) then
+            settings = HttpService:JSONDecode(readfile(CONFIG_FILE))
+        end
+    end)
+    return settings
+end
+
+-- ★ 保存当前的 UI 状态
+local function saveSettings()
+    local settings = {
+        macroName = currentMacroName,
+        autoVote = autoVote,
+        autoReady = autoReady,
+        autoPlayOnReady = autoPlayOnReady,
+        autoRejoin = autoRejoin,
+        autoPickItem = autoPickItem,
+        replayDelay = replayDelay,
+        selectedDifficulty = selectedDifficulty,
+        verbose = verbose
+    }
+    pcall(function()
+        writefile(CONFIG_FILE, HttpService:JSONEncode(settings))
+    end)
+end
+
+local savedData = loadSettings()
 
 --==================== 余额监听 ====================
 task.spawn(function()
@@ -166,7 +199,6 @@ bgImage.Image = "rbxassetid://79176013131678"
 bgImage.ImageTransparency = 0.2 
 bgImage.Parent = bgGui
 
--- 可选：一层薄薄的黑纱，压暗背景，让 WindUI 的白字更清晰
 local bgOverlay = Instance.new("Frame")
 bgOverlay.Size = UDim2.new(1, 0, 1, 0)
 bgOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -176,8 +208,8 @@ bgOverlay.Parent = bgGui
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 2.3",
-    Author = "Macro + Auto Pick",
+    Title = "塔防宏 2.4",
+    Author = "Macro + Memory",
     Icon = "shield",
     Transparent = true,
 })
@@ -196,10 +228,14 @@ dbgParagraph = DbgTab:Paragraph({ Title = "运行日志", Desc = "-" })
 --==================== 宏管理 ====================
 MainTab:Section({ Title = "宏管理" })
 
+local macroList = loadAllMacros()
+local startMacro = savedData.macroName or "新建宏..."
+if not table.find(macroList, startMacro) then startMacro = "新建宏..." end
+
 local macroDropdown = MainTab:Dropdown({
     Title = "选择已有宏",
-    Values = loadAllMacros(),
-    Value = "新建宏...",
+    Values = macroList,
+    Value = startMacro,
     Callback = function(opt)
         if opt == "新建宏..." then
             currentMacroName = nil
@@ -210,8 +246,16 @@ local macroDropdown = MainTab:Dropdown({
             recordings = allMacrosData[opt] or {}
             setStatus(("状态: 已加载 [%s]，%d 个动作"):format(opt, #recordings))
         end
+        saveSettings() -- 自动保存状态
     end,
 })
+
+-- 自动恢复上次选的宏
+if startMacro ~= "新建宏..." then
+    currentMacroName = startMacro
+    recordings = allMacrosData[startMacro] or {}
+    setStatus(("状态: 已恢复 [%s]"):format(startMacro))
+end
 
 MainTab:Input({
     Title = "新建宏名称",
@@ -229,6 +273,7 @@ MainTab:Input({
             macroDropdown:Refresh(loadAllMacros())
             macroDropdown:Set(text)
         end)
+        saveSettings()
     end,
 })
 
@@ -244,7 +289,7 @@ recordToggle = MainTab:Toggle({
     Callback = function(v)
         if v then
             if isPlaying then stopPlayback() end
-            if not currentMacroName then
+            if not currentMacroName or currentMacroName == "新建宏..." then
                 pcall(function() recordToggle:Set(false) end)
                 setStatus("状态: 请先选择或新建宏")
                 return
@@ -281,94 +326,70 @@ AutoTab:Section({ Title = "挂机" })
 
 AutoTab:Toggle({
     Title = "自动投票",
-    Value = false,
-    Callback = function(v) autoVote = v end,
+    Value = savedData.autoVote or false,
+    Callback = function(v) autoVote = v; saveSettings() end,
 })
 
-AutoTab:Dropdown({
+local diffDropdown = AutoTab:Dropdown({
     Title = "投票难度",
     Values = { "Easy", "Medium", "Hard", "Insane" },
-    Value = "Medium",
-    Callback = function(o) selectedDifficulty = o end,
+    Value = savedData.selectedDifficulty or "Medium",
+    Callback = function(o) selectedDifficulty = o; saveSettings() end,
 })
+selectedDifficulty = diffDropdown.Value
 
 AutoTab:Toggle({
     Title = "自动点准备 (ReadyButton)",
-    Value = false,
-    Callback = function(v) autoReady = v end,
+    Value = savedData.autoReady or false,
+    Callback = function(v) autoReady = v; saveSettings() end,
 })
 
 AutoTab:Toggle({
     Title = "出现 ReadyFrame 时自动回放",
-    Value = false,
-    Callback = function(v) autoPlayOnReady = v end,
+    Value = savedData.autoPlayOnReady or false,
+    Callback = function(v) autoPlayOnReady = v; saveSettings() end,
 })
 
 AutoTab:Toggle({
     Title = "打完后自动重开下一局",
-    Value = false,
-    Callback = function(v) autoRejoin = v end,
+    Value = savedData.autoRejoin or false,
+    Callback = function(v) autoRejoin = v; saveSettings() end,
 })
 
 AutoTab:Toggle({
     Title = "自动瞬移捡道具",
-    Value = false,
-    Callback = function(v) autoPickItem = v end,
+    Value = savedData.autoPickItem or false,
+    Callback = function(v) autoPickItem = v; saveSettings() end,
 })
+autoPickItem = savedData.autoPickItem or false
 
-AutoTab:Input({
+local delayInput = AutoTab:Input({
     Title = "回放延迟（秒）",
-    Placeholder = "3",
+    Placeholder = tostring(savedData.replayDelay or "3"),
     Callback = function(t)
         local n = tonumber(t)
-        if n then replayDelay = math.clamp(n, 0, 30) end
+        if n then 
+            replayDelay = math.clamp(n, 0, 30) 
+            saveSettings()
+        end
     end,
 })
+replayDelay = savedData.replayDelay or 3
 
 --==================== 调试 ====================
 DbgTab:Section({ Title = "诊断" })
 
-DbgTab:Toggle({
+local verboseToggle = DbgTab:Toggle({
     Title = "控制台输出日志",
-    Value = true,
-    Callback = function(v) verbose = v end,
+    Value = savedData.verbose ~= false,
+    Callback = function(v) verbose = v; saveSettings() end,
 })
+verbose = savedData.verbose ~= false
 
 DbgTab:Button({
     Title = "打印当前宏摘要",
     Callback = function()
         log(("宏: %s  动作数: %d"):format(tostring(currentMacroName), #recordings))
-        local placeN, towerN = 0, 0
-        for _, a in ipairs(recordings) do
-            if a.kind == "place" then placeN = placeN + 1 else towerN = towerN + 1 end
-        end
-        log(("放塔 %d  升级/卖塔 %d"):format(placeN, towerN))
-    end,
-})
-
-DbgTab:Button({
-    Title = "测试：用第一条放塔动作发一次包",
-    Callback = function()
-        local act
-        for _, a in ipairs(recordings) do
-            if a.kind == "place" and a.pos then act = a break end
-        end
-        if not act then
-            setStatus("状态: 没有可测试的放塔动作")
-            return
-        end
-        if not RequestPlacement then
-            setStatus("状态: RequestPlacement 不存在")
-            return
-        end
-        local uid = guid()
-        local ts  = Workspace:GetServerTimeNow()
-        local ok, ret = pcall(function()
-            return RequestPlacement:InvokeServer(act.tower,
-                Vector3.new(act.pos[1], act.pos[2], act.pos[3]), act.rot or 0, uid, ts)
-        end)
-        log(("测试放塔 %s ok=%s ret=%s"):format(tostring(act.tower), tostring(ok), tostring(ret)))
-        setStatus("状态: 测试发包完成，看日志")
     end,
 })
 
@@ -383,18 +404,11 @@ local function installHook()
     local oldNamecall
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
-        if method ~= "InvokeServer" and method ~= "FireServer" then
-            return oldNamecall(self, ...)
-        end
-        if typeof(self) ~= "Instance" then
-            return oldNamecall(self, ...)
-        end
-        if not isRecording or isPlaying then
-            return oldNamecall(self, ...)
-        end
+        if method ~= "InvokeServer" and method ~= "FireServer" then return oldNamecall(self, ...) end
+        if typeof(self) ~= "Instance" then return oldNamecall(self, ...) end
+        if not isRecording or isPlaying then return oldNamecall(self, ...) end
 
         local name = self.Name
-
         if name == "RequestPlacement" then
             local a1, a2, a3 = ...
             local results = table.pack(oldNamecall(self, ...))
@@ -402,17 +416,12 @@ local function installHook()
 
             if type(realUid) == "string" and typeof(a2) == "Vector3" then
                 table.insert(recordings, {
-                    kind    = "place",
-                    tower   = tostring(a1),
-                    pos     = { a2.X, a2.Y, a2.Z },
-                    rot     = tonumber(a3) or 0,
-                    realUid = realUid, 
-                    cash    = liveCash,
+                    kind = "place", tower = tostring(a1),
+                    pos = { a2.X, a2.Y, a2.Z }, rot = tonumber(a3) or 0,
+                    realUid = realUid, cash = liveCash,
                 })
                 setStatus(("状态: 🔴 已录放塔 (%d)"):format(#recordings))
                 log(("录制放塔 %s -> %s"):format(tostring(a1), realUid))
-            else
-                log(("录制跳过：放塔未返回UUID (%s)"):format(tostring(realUid)))
             end
             return table.unpack(results, 1, results.n)
 
@@ -420,18 +429,15 @@ local function installHook()
             local a1 = ...
             table.insert(recordings, {
                 kind = (name == "RequestTowerUpgrade") and "upgrade" or "sell",
-                uid  = tostring(a1), 
-                cash = liveCash,
+                uid  = tostring(a1), cash = liveCash,
             })
             setStatus(("状态: 🔴 已录动作 (%d)"):format(#recordings))
-            log(("录制%s %s"):format(
-                (name == "RequestTowerUpgrade") and "升级" or "卖塔", tostring(a1)))
+            log(("录制%s %s"):format((name == "RequestTowerUpgrade") and "升级" or "卖塔", tostring(a1)))
             return oldNamecall(self, ...)
         end
 
         return oldNamecall(self, ...)
     end)
-
     getgenv().TD2_OLD_NAMECALL = oldNamecall
 end
 
@@ -440,29 +446,20 @@ local function placeOnce(act)
     local uid = guid()
     local ts  = Workspace:GetServerTimeNow() 
     local ok, ret = pcall(function()
-        return RequestPlacement:InvokeServer(
-            act.tower,
-            Vector3.new(act.pos[1], act.pos[2], act.pos[3]),
-            act.rot or 0,
-            uid,
-            ts)
+        return RequestPlacement:InvokeServer(act.tower, Vector3.new(act.pos[1], act.pos[2], act.pos[3]), act.rot or 0, uid, ts)
     end)
-    if ok and type(ret) == "string" then
-        return true, ret
-    end
+    if ok and type(ret) == "string" then return true, ret end
     return false, ok and ret or tostring(ret)
 end
 
 local function runTowerAction(act, failedUid)
-    if not act.uid then return false, "skip" end
-    if failedUid[act.uid] then return false, "skip" end
+    if not act.uid or failedUid[act.uid] then return false, "skip" end
     local target = uidMap[act.uid]
     if not target then return false, "skip" end 
     local remote = (act.kind == "upgrade") and RequestTowerUpgrade or RequestTowerSell
     if not remote then return false, "no remote" end
     local ok, ret = pcall(function() return remote:InvokeServer(target) end)
-    if not ok then return false, tostring(ret) end
-    return true, ret
+    return ok, ret
 end
 
 local function finishPlayback(msg)
@@ -473,23 +470,7 @@ local function finishPlayback(msg)
 end
 
 function startPlayback()
-    if isRecording then
-        setStatus("状态: 录制中不能回放")
-        pcall(function() playToggle:Set(false) end)
-        return
-    end
-    if isPlaying then return end
-    if #recordings == 0 then
-        setStatus("状态: 当前宏为空")
-        pcall(function() playToggle:Set(false) end)
-        return
-    end
-    if not (RequestPlacement and RequestTowerUpgrade and RequestTowerSell) then
-        setStatus("状态: ❌ Remotes 缺失")
-        pcall(function() playToggle:Set(false) end)
-        return
-    end
-
+    if isRecording or isPlaying or #recordings == 0 then return end
     isPlaying = true
     uidMap = {}
     pcall(function() playToggle:Set(true) end)
@@ -502,12 +483,10 @@ function startPlayback()
 
         for i, act in ipairs(recordings) do
             if not isPlaying then break end
-
             if act.cash and act.cash > 0 then
                 local deadline = os.clock() + CASH_WAIT_MAX
                 while isPlaying and liveCash < act.cash and os.clock() < deadline do
-                    setStatus(("🟡 等钱 %d/%d 需 %d 现 %d")
-                        :format(i, #recordings, act.cash, liveCash))
+                    setStatus(("🟡 等钱 %d/%d 需 %d 现 %d"):format(i, #recordings, act.cash, liveCash))
                     task.wait(0.1)
                 end
             end
@@ -528,130 +507,89 @@ function startPlayback()
                 else
                     failN = failN + 1
                     if act.realUid then failedUid[act.realUid] = true end
-                    setStatus(("🔴 放塔失败 %d/%d [%s]"):format(i, #recordings, act.tower))
                     log(("放塔失败 %d %s ret=%s"):format(i, act.tower, tostring(ret)))
                 end
             else
                 local ok, ret = runTowerAction(act, failedUid)
                 if ok then
                     okN = okN + 1
-                    setStatus(("🔵 %s %d/%d"):format(act.kind, i, #recordings))
                     log(("%s %d ok"):format(act.kind, i))
                 elseif ret == "skip" then
                     skipN = skipN + 1
-                    log(("%s 跳过 %d（目标塔未放置）"):format(act.kind, i))
                 else
                     failN = failN + 1
                     log(("%s 失败 %d ret=%s"):format(act.kind, i, tostring(ret)))
                 end
             end
-
             task.wait(ACTION_GAP)
         end
-
-        finishPlayback(("状态: 🟢 结束 成功%d 失败%d 跳过%d"):format(okN, failN, skipN))
-        log(("回放结束 ok=%d fail=%d skip=%d"):format(okN, failN, skipN))
+        finishPlayback(("状态: 🟢 结束 成功%d 失败%d"):format(okN, failN))
     end)
 end
 
 function stopPlayback()
     if not isPlaying then return end
     isPlaying = false
-    if playThread then
-        pcall(function() task.cancel(playThread) end)
-        playThread = nil
-    end
+    if playThread then pcall(function() task.cancel(playThread) end); playThread = nil end
     pcall(function() playToggle:Set(false) end)
     setStatus("状态: 🟡 已停止")
-    log("回放已手动停止")
 end
 
---==================== 自动捡道具监听器 ====================
+--==================== 自动捡道具 ====================
 Workspace:WaitForChild("ItemDrops", 10)
 local itemDropsFolder = Workspace:FindFirstChild("ItemDrops")
 
 if itemDropsFolder then
     itemDropsFolder.DescendantAdded:Connect(function(item)
-        if not autoPickItem then return end
-        if item:IsA("Model") then
-            task.wait(0.1)
-            if not autoPickItem or not item.Parent then return end
-            
-            local targetPos = nil
-            if item.PrimaryPart then
-                targetPos = item.PrimaryPart.Position
-            else
-                local success, pivot = pcall(function() return item:GetPivot().Position end)
-                if success then targetPos = pivot end
-            end
-
-            if targetPos then
-                local char = player.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    local returnPos = hrp.CFrame
-                    hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
-                    log(("⭐ 发现道具，已瞬移拾取"))
-                    task.wait(0.3)
-                    if autoPickItem and hrp and hrp.Parent then
-                        hrp.CFrame = returnPos
-                    end
-                end
-            end
+        if not autoPickItem or not item:IsA("Model") then return end
+        task.wait(0.1)
+        if not autoPickItem or not item.Parent then return end
+        
+        local targetPos = item.PrimaryPart and item.PrimaryPart.Position or (pcall(function() return item:GetPivot().Position end) and item:GetPivot().Position)
+        local char = player.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        
+        if targetPos and hrp then
+            local returnPos = hrp.CFrame
+            hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
+            log("⭐ 发现道具，已瞬移拾取")
+            task.wait(0.3)
+            if autoPickItem and hrp and hrp.Parent then hrp.CFrame = returnPos end
         end
     end)
-    log("✅ 自动捡道具服务已挂载")
 end
 
---==================== ReadyFrame 触发 + 自动化 ====================
-local function getReadyFrame()
-    if readyFrameRef and readyFrameRef.Parent and readyFrameRef:IsDescendantOf(playerGui) then
-        return readyFrameRef
-    end
-    readyFrameRef = findByName(playerGui, "ReadyFrame")
-    return readyFrameRef
-end
-
+--==================== 自动化循环 ====================
 task.spawn(function()
     local firedRound = false
     local lastVote, lastReady, lastRejoin = 0, 0, 0
 
     while true do
         task.wait(0.2)
-
-        if isRecording then
-            firedRound = false
-        else
+        if not isRecording then
             local now = os.clock()
-
             if autoVote and CastDifficultyVote and now - lastVote >= 1 then
                 lastVote = now
                 pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
             end
-            
             if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
                 lastRejoin = now
                 pcall(function() ResultsAction:FireServer("Rejoin") end)
             end
 
-            local frame = getReadyFrame()
-            local frameVisible = frame ~= nil and frame.Parent ~= nil and isVisibleDeep(frame)
-            if frameVisible then
+            local frame = findByName(playerGui, "ReadyFrame")
+            if frame and isVisibleDeep(frame) then
                 if autoReady and now - lastReady >= 1 then
                     lastReady = now
                     local btn = frame:FindFirstChild("ReadyButton", true)
                     if btn and btn:IsA("TextButton") and isVisibleDeep(btn) then
                         local ok = pcall(function() firesignal(btn.MouseButton1Click) end)
-                        if not ok and ReadyUp then
-                            pcall(function() ReadyUp:FireServer() end)
-                        end
+                        if not ok and ReadyUp then pcall(function() ReadyUp:FireServer() end) end
                     end
                 end
-
                 if autoPlayOnReady and not firedRound then
                     firedRound = true
-                    setStatus(("状态: 🟢 检测到 ReadyFrame，%.1f 秒后回放"):format(replayDelay))
-                    log("ReadyFrame 出现，准备回放")
+                    setStatus(("状态: 🟢 ReadyFrame 出现，%.1f 秒后回放"):format(replayDelay))
                     task.wait(replayDelay)
                     if not isRecording then
                         if isPlaying then stopPlayback() task.wait(0.3) end
@@ -667,5 +605,4 @@ end)
 
 --==================== 启动 ====================
 installHook()
-setStatus("状态: 就绪（先选宏 → 录制 → 回放）")
-log("脚本加载完成")
+log("脚本加载完成，已恢复上次状态。")
