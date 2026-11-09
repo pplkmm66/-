@@ -1,5 +1,9 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v4.0 (彻底重置状态版)
+-- 随机塔防 宏录制/回放 v5.0
+--   + 逻辑状态统一走 cfg 表（杜绝 UI 与逻辑不同步）
+--   + Profile 保存 / 加载 / 重置为默认
+--   + 每局生命周期状态重置（Ready/投票/重开）
+--   + 重载后自动恢复全部功能
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -10,8 +14,14 @@ local Workspace   = game:GetService("Workspace")
 local player      = Players.LocalPlayer
 local playerGui   = player:WaitForChild("PlayerGui")
 
-local SAVE_FOLDER = "TD2_Macro_Data"
-local CONFIG_FILE = "TD2_Macro_Data/config.json" 
+local SAVE_FOLDER  = "TD2_Macro_Data"
+local PROFILE_DIR  = SAVE_FOLDER .. "/profiles"
+local CONFIG_FILE  = SAVE_FOLDER .. "/config.json"
+
+pcall(function()
+    if not isfolder(SAVE_FOLDER) then makefolder(SAVE_FOLDER) end
+    if not isfolder(PROFILE_DIR) then makefolder(PROFILE_DIR) end
+end)
 
 --==================== Remotes ====================
 local Remotes             = RS:WaitForChild("Remotes", 30)
@@ -24,7 +34,45 @@ local CastDifficultyVote  = Events and Events:WaitForChild("CastDifficultyVote",
 local ReadyUp             = Events and Events:WaitForChild("ReadyUp", 30)
 local ResultsAction       = Events and Events:WaitForChild("ResultsAction", 30)
 
---==================== 状态 ====================
+--==================== 配置（唯一真相源） ====================
+local DEFAULT_CFG = {
+    autoVote         = false,
+    autoReady        = false,
+    autoPlayOnReady  = false,
+    autoRejoin       = false,
+    autoPickItem     = false,
+    replayDelay      = 3,
+    selectedDifficulty = "Medium",
+    verbose          = true,
+    macroName        = "新建宏...",
+    profile          = "default",
+}
+
+local cfg = {}
+for k, v in pairs(DEFAULT_CFG) do cfg[k] = v end
+
+local function readJson(path)
+    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+    if ok and type(data) == "table" then return data end
+    return nil
+end
+
+local function writeJson(path, data)
+    pcall(function() writefile(path, HttpService:JSONEncode(data)) end)
+end
+
+do
+    local saved = readJson(CONFIG_FILE)
+    if saved then
+        for k in pairs(DEFAULT_CFG) do
+            if saved[k] ~= nil then cfg[k] = saved[k] end
+        end
+    end
+end
+
+local function saveCfg() writeJson(CONFIG_FILE, cfg) end
+
+--==================== 运行时状态 ====================
 local currentMacroName = nil
 local recordings       = {}
 local allMacrosData    = {}
@@ -33,25 +81,15 @@ local isPlaying        = false
 local playThread       = nil
 local liveCash         = 0
 local uidMap           = {}
-local readyFrameRef    = nil
-local verbose          = true
 local dbLines          = {}
 local dbgParagraph     = nil
 local lastDbRefresh    = 0
 
-local autoVote           = false
-local autoReady          = false
-local autoPlayOnReady    = false
-local autoRejoin         = false
-local autoPickItem       = false 
-local replayDelay        = 3
-local selectedDifficulty = "Medium"
+local CASH_WAIT_MAX = 25
+local PLACE_RETRY   = 2
+local ACTION_GAP    = 0.08
 
-local CASH_WAIT_MAX = 25   
-local PLACE_RETRY   = 2    
-local ACTION_GAP    = 0.08 
-
-local startPlayback, stopPlayback   
+local startPlayback, stopPlayback
 
 --==================== 工具 ====================
 local function guid()
@@ -104,29 +142,25 @@ local function log(msg)
     local line = ("[%s] %s"):format(os.date("%H:%M:%S"), msg)
     table.insert(dbLines, line)
     while #dbLines > 14 do table.remove(dbLines, 1) end
-    if verbose then print(line) end
+    if cfg.verbose then print(line) end
     if dbgParagraph and os.clock() - lastDbRefresh > 0.5 then
         lastDbRefresh = os.clock()
         pcall(function() dbgParagraph:SetDesc(table.concat(dbLines, "\n")) end)
     end
 end
 
---==================== 存档 & 状态记忆 ====================
-pcall(function()
-    if not isfolder(SAVE_FOLDER) then makefolder(SAVE_FOLDER) end
-end)
-
+--==================== 宏存档 ====================
 local function loadAllMacros()
     local names = { "新建宏..." }
     pcall(function()
         for _, file in ipairs(listfiles(SAVE_FOLDER)) do
             local name = file:match("([^/\\]+)%.json$")
-            if name and name ~= "config" then 
+            if name and name ~= "config" then
                 table.insert(names, name)
-                local ok, data = pcall(function()
-                    return HttpService:JSONDecode(readfile(file))
-                end)
-                if ok and type(data) == "table" then allMacrosData[name] = data end
+                local data = readJson(file)
+                if data and type(data) == "table" and data[1] ~= nil then
+                    allMacrosData[name] = data
+                end
             end
         end
     end)
@@ -136,39 +170,46 @@ end
 local function saveCurrentMacro()
     if not currentMacroName or currentMacroName == "新建宏..." then return end
     allMacrosData[currentMacroName] = recordings
-    pcall(function()
-        writefile(SAVE_FOLDER .. "/" .. currentMacroName .. ".json", HttpService:JSONEncode(recordings))
-    end)
+    writeJson(SAVE_FOLDER .. "/" .. currentMacroName .. ".json", recordings)
 end
 
-local function loadSettings()
-    local settings = {}
+--==================== Profile ====================
+local profileDirty = false
+local pendingProfileName = nil
+local profileStateParagraph = nil
+
+local function listProfiles()
+    local list = { "default" }
     pcall(function()
-        if isfile(CONFIG_FILE) then
-            settings = HttpService:JSONDecode(readfile(CONFIG_FILE))
+        for _, f in ipairs(listfiles(PROFILE_DIR)) do
+            local n = f:match("([^/\\]+)%.json$")
+            if n and n ~= "default" then table.insert(list, n) end
         end
     end)
-    return settings
+    return list
 end
 
-local function saveSettings()
-    local settings = {
-        macroName = currentMacroName,
-        autoVote = autoVote,
-        autoReady = autoReady,
-        autoPlayOnReady = autoPlayOnReady,
-        autoRejoin = autoRejoin,
-        autoPickItem = autoPickItem,
-        replayDelay = replayDelay,
-        selectedDifficulty = selectedDifficulty,
-        verbose = verbose
-    }
-    pcall(function()
-        writefile(CONFIG_FILE, HttpService:JSONEncode(settings))
-    end)
+local function saveProfile(name)
+    if not name or name == "" then return false end
+    cfg.profile = name
+    writeJson(PROFILE_DIR .. "/" .. name .. ".json", cfg)
+    saveCfg()
+    profileDirty = false
+    return true
 end
 
-local savedData = loadSettings()
+local function loadProfile(name)
+    if not name or name == "" then return false end
+    local data = readJson(PROFILE_DIR .. "/" .. name .. ".json")
+    if not data then return false end
+    for k in pairs(DEFAULT_CFG) do
+        if data[k] ~= nil then cfg[k] = data[k] end
+    end
+    cfg.profile = name
+    saveCfg()
+    profileDirty = false
+    return true
+end
 
 --==================== 余额监听 ====================
 task.spawn(function()
@@ -181,16 +222,17 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 4.0",
-    Author = "Macro + Memory",
-    Icon = "shield",
-    Background = "rbxassetid://79176013131678", 
-    BackgroundImageTransparency = 0.3, 
+    Title    = "塔防宏 5.0",
+    Author   = "Macro + Profile",
+    Icon     = "shield",
+    Background = "rbxassetid://79176013131678",
+    BackgroundImageTransparency = 0.3,
     Transparent = true,
 })
 
 local MainTab = Window:Tab({ Title = "宏控制", Icon = "settings" })
 local AutoTab = Window:Tab({ Title = "自动化", Icon = "zap" })
+local ConfTab = Window:Tab({ Title = "配置档案", Icon = "save" })
 local DbgTab  = Window:Tab({ Title = "调试", Icon = "bug" })
 
 local statusParagraph = MainTab:Paragraph({ Title = "状态", Desc = "状态: 等待操作..." })
@@ -200,11 +242,26 @@ end
 
 dbgParagraph = DbgTab:Paragraph({ Title = "运行日志", Desc = "-" })
 
+local suppressDirty = false
+local function refreshProfileState()
+    if not profileStateParagraph then return end
+    local txt = profileDirty
+        and ("Profile: %s\n* Unsaved changes"):format(cfg.profile or "default")
+        or  ("Profile: %s\nAll changes saved"):format(cfg.profile or "default")
+    pcall(function() profileStateParagraph:SetDesc(txt) end)
+end
+
+local function markDirty()
+    if suppressDirty then return end
+    profileDirty = true
+    refreshProfileState()
+end
+
 --==================== 宏管理 ====================
 MainTab:Section({ Title = "宏管理" })
 
 local macroList = loadAllMacros()
-local startMacro = savedData.macroName or "新建宏..."
+local startMacro = cfg.macroName
 if not table.find(macroList, startMacro) then startMacro = "新建宏..." end
 
 local macroDropdown = MainTab:Dropdown({
@@ -221,14 +278,15 @@ local macroDropdown = MainTab:Dropdown({
             recordings = allMacrosData[opt] or {}
             setStatus(("状态: 已加载 [%s]，%d 个动作"):format(opt, #recordings))
         end
-        saveSettings() 
+        cfg.macroName = opt
+        saveCfg()
+        markDirty()
     end,
 })
 
 if startMacro ~= "新建宏..." then
     currentMacroName = startMacro
     recordings = allMacrosData[startMacro] or {}
-    setStatus(("状态: 已恢复 [%s]"):format(startMacro))
 end
 
 MainTab:Input({
@@ -238,16 +296,15 @@ MainTab:Input({
         if text == "" or allMacrosData[text] then return end
         allMacrosData[text] = {}
         recordings = {}
-        pcall(function()
-            writefile(SAVE_FOLDER .. "/" .. text .. ".json", "[]")
-        end)
+        writeJson(SAVE_FOLDER .. "/" .. text .. ".json", {})
         currentMacroName = text
+        cfg.macroName = text
+        saveCfg()
         setStatus("状态: 已新建 [" .. text .. "]")
         pcall(function()
             macroDropdown:Refresh(loadAllMacros())
             macroDropdown:Set(text)
         end)
-        saveSettings()
     end,
 })
 
@@ -290,75 +347,148 @@ playToggle = MainTab:Toggle({
     end,
 })
 
-MainTab:Button({
-    Title = "强制停止回放",
-    Callback = function() stopPlayback() end,
-})
+MainTab:Button({ Title = "强制停止回放", Callback = function() stopPlayback() end })
 
 --==================== 自动化 ====================
 AutoTab:Section({ Title = "挂机" })
 
-AutoTab:Toggle({
+local uiToggles   = {}
+local uiDropdowns = {}
+local uiInputs    = {}
+
+uiToggles.autoVote = AutoTab:Toggle({
     Title = "自动投票",
-    Value = savedData.autoVote or false,
-    Callback = function(v) autoVote = v; saveSettings() end,
+    Value = cfg.autoVote,
+    Callback = function(v) cfg.autoVote = v; saveCfg(); markDirty() end,
 })
 
-local diffDropdown = AutoTab:Dropdown({
+uiDropdowns.selectedDifficulty = AutoTab:Dropdown({
     Title = "投票难度",
     Values = { "Easy", "Medium", "Hard", "Insane" },
-    Value = savedData.selectedDifficulty or "Medium",
-    Callback = function(o) selectedDifficulty = o; saveSettings() end,
+    Value = cfg.selectedDifficulty,
+    Callback = function(o) cfg.selectedDifficulty = o; saveCfg(); markDirty() end,
 })
-selectedDifficulty = diffDropdown.Value
 
-AutoTab:Toggle({
+uiToggles.autoReady = AutoTab:Toggle({
     Title = "自动点准备 (ReadyUp)",
-    Value = savedData.autoReady or false,
-    Callback = function(v) autoReady = v; saveSettings() end,
+    Value = cfg.autoReady,
+    Callback = function(v) cfg.autoReady = v; saveCfg(); markDirty() end,
 })
 
-AutoTab:Toggle({
+uiToggles.autoPlayOnReady = AutoTab:Toggle({
     Title = "出现 ReadyFrame 时自动回放",
-    Value = savedData.autoPlayOnReady or false,
-    Callback = function(v) autoPlayOnReady = v; saveSettings() end,
+    Value = cfg.autoPlayOnReady,
+    Callback = function(v) cfg.autoPlayOnReady = v; saveCfg(); markDirty() end,
 })
 
-AutoTab:Toggle({
-    Title = "打完后自动重开下一局",
-    Value = savedData.autoRejoin or false,
-    Callback = function(v) autoRejoin = v; saveSettings() end,
+uiToggles.autoRejoin = AutoTab:Toggle({
+    Title = "结算后自动重开下一局",
+    Value = cfg.autoRejoin,
+    Callback = function(v) cfg.autoRejoin = v; saveCfg(); markDirty() end,
 })
 
-AutoTab:Toggle({
+uiToggles.autoPickItem = AutoTab:Toggle({
     Title = "自动瞬移捡道具",
-    Value = savedData.autoPickItem or false,
-    Callback = function(v) autoPickItem = v; saveSettings() end,
+    Value = cfg.autoPickItem,
+    Callback = function(v) cfg.autoPickItem = v; saveCfg(); markDirty() end,
 })
-autoPickItem = savedData.autoPickItem or false
 
-local delayInput = AutoTab:Input({
+uiInputs.replayDelay = AutoTab:Input({
     Title = "回放延迟（秒）",
-    Placeholder = tostring(savedData.replayDelay or "3"),
+    Placeholder = tostring(cfg.replayDelay),
     Callback = function(t)
         local n = tonumber(t)
-        if n then 
-            replayDelay = math.clamp(n, 0, 30) 
-            saveSettings()
+        if n then
+            cfg.replayDelay = math.clamp(n, 0, 30)
+            saveCfg(); markDirty()
         end
     end,
 })
-replayDelay = savedData.replayDelay or 3
+
+--==================== 配置档案（Profile） ====================
+ConfTab:Section({ Title = "Profile" })
+
+profileStateParagraph = ConfTab:Paragraph({
+    Title = "Profile state",
+    Desc = ("Profile: %s\nAll changes saved"):format(cfg.profile or "default"),
+})
+
+local pendingName = nil
+
+ConfTab:Input({
+    Title = "Profile name",
+    Placeholder = cfg.profile or "default",
+    Callback = function(text)
+        pendingName = (text ~= "" and text) or nil
+        log("待保存的档案名: " .. tostring(pendingName or cfg.profile))
+    end,
+})
+
+local profileDropdown = ConfTab:Dropdown({
+    Title = "Saved profiles",
+    Values = listProfiles(),
+    Value = cfg.profile or "default",
+    Callback = function(name)
+        cfg.profile = name
+        saveCfg()
+        refreshProfileState()
+    end,
+})
+
+ConfTab:Button({
+    Title = "Save profile",
+    Callback = function()
+        local name = pendingName or cfg.profile or "default"
+        if saveProfile(name) then
+            pcall(function()
+                profileDropdown:Refresh(listProfiles())
+                profileDropdown:Set(name)
+            end)
+            refreshProfileState()
+            log("已保存档案 [" .. name .. "]")
+            setStatus("状态: 档案已保存 [" .. name .. "]")
+        end
+    end,
+})
+
+ConfTab:Button({
+    Title = "Load profile",
+    Callback = function()
+        local name = cfg.profile or "default"
+        if loadProfile(name) then
+            applyCfgToUI()
+            log("已加载档案 [" .. name .. "]")
+            setStatus("状态: 已加载档案 [" .. name .. "]")
+        else
+            setStatus("状态: 档案不存在 [" .. tostring(name) .. "]")
+        end
+    end,
+})
+
+ConfTab:Button({
+    Title = "Reset to default（全部关闭）",
+    Callback = function()
+        local keepProfile = cfg.profile
+        for k, v in pairs(DEFAULT_CFG) do cfg[k] = v end
+        cfg.profile = keepProfile
+        cfg.macroName = currentMacroName or "新建宏..."
+        saveCfg()
+        applyCfgToUI()
+        profileDirty = true
+        refreshProfileState()
+        log("已重置为默认（全部功能关闭）")
+        setStatus("状态: 已重置为默认")
+    end,
+})
 
 --==================== 调试 ====================
 DbgTab:Section({ Title = "诊断" })
 
-local verboseToggle = DbgTab:Toggle({
+uiToggles.verbose = DbgTab:Toggle({
     Title = "控制台输出日志",
-    Value = savedData.verbose ~= false,
-    Callback = function(v) verbose = v; saveSettings() end,
+    Value = cfg.verbose,
+    Callback = function(v) cfg.verbose = v; saveCfg(); markDirty() end,
 })
-verbose = savedData.verbose ~= false
 
 DbgTab:Button({
     Title = "打印当前宏摘要",
@@ -366,6 +496,48 @@ DbgTab:Button({
         log(("宏: %s  动作数: %d"):format(tostring(currentMacroName), #recordings))
     end,
 })
+
+DbgTab:Button({
+    Title = "扫描可见界面（找结算面板名）",
+    Callback = function()
+        local names, seen = {}, {}
+        local count = 0
+        for _, gui in ipairs(playerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled then
+                table.insert(names, "[ScreenGui] " .. gui.Name)
+                for _, d in ipairs(gui:GetDescendants()) do
+                    if d:IsA("GuiObject") and isVisibleDeep(d) and not seen[d.Name] then
+                        seen[d.Name] = true
+                        table.insert(names, d.Name)
+                        count = count + 1
+                        if count > 50 then break end
+                    end
+                end
+            end
+        end
+        log("可见界面: " .. table.concat(names, ", "))
+        setStatus("状态: 界面名已打印到日志")
+    end,
+})
+
+--==================== 配置同步到 UI ====================
+function applyCfgToUI()
+    suppressDirty = true
+    for key, w in pairs(uiToggles) do
+        pcall(function() w:Set(cfg[key] == true) end)
+    end
+    for key, w in pairs(uiDropdowns) do
+        pcall(function() w:Set(cfg[key]) end)
+    end
+    for key, w in pairs(uiInputs) do
+        local v = cfg[key]
+        if v ~= nil then pcall(function() w:Set(tostring(v)) end) end
+    end
+    suppressDirty = false
+    refreshProfileState()
+end
+
+applyCfgToUI()
 
 --==================== 录制 Hook ====================
 local function installHook()
@@ -387,7 +559,6 @@ local function installHook()
             local a1, a2, a3 = ...
             local results = table.pack(oldNamecall(self, ...))
             local realUid = results[1]
-
             if type(realUid) == "string" and typeof(a2) == "Vector3" then
                 table.insert(recordings, {
                     kind = "place", tower = tostring(a1),
@@ -406,21 +577,22 @@ local function installHook()
                 uid  = tostring(a1), cash = liveCash,
             })
             setStatus(("状态: 🔴 已录动作 (%d)"):format(#recordings))
-            log(("录制%s %s"):format((name == "RequestTowerUpgrade") and "升级" or "卖塔", tostring(a1)))
             return oldNamecall(self, ...)
         end
 
         return oldNamecall(self, ...)
     end)
+
     getgenv().TD2_OLD_NAMECALL = oldNamecall
 end
 
 --==================== 回放 ====================
 local function placeOnce(act)
     local uid = guid()
-    local ts  = Workspace:GetServerTimeNow() 
+    local ts  = Workspace:GetServerTimeNow()
     local ok, ret = pcall(function()
-        return RequestPlacement:InvokeServer(act.tower, Vector3.new(act.pos[1], act.pos[2], act.pos[3]), act.rot or 0, uid, ts)
+        return RequestPlacement:InvokeServer(act.tower,
+            Vector3.new(act.pos[1], act.pos[2], act.pos[3]), act.rot or 0, uid, ts)
     end)
     if ok and type(ret) == "string" then return true, ret end
     return false, ok and ret or tostring(ret)
@@ -429,7 +601,7 @@ end
 local function runTowerAction(act, failedUid)
     if not act.uid or failedUid[act.uid] then return false, "skip" end
     local target = uidMap[act.uid]
-    if not target then return false, "skip" end 
+    if not target then return false, "skip" end
     local remote = (act.kind == "upgrade") and RequestTowerUpgrade or RequestTowerSell
     if not remote then return false, "no remote" end
     local ok, ret = pcall(function() return remote:InvokeServer(target) end)
@@ -477,7 +649,6 @@ function startPlayback()
                     okN = okN + 1
                     if act.realUid then uidMap[act.realUid] = ret end
                     setStatus(("🟢 放塔 %d/%d [%s]"):format(i, #recordings, act.tower))
-                    log(("放塔 %d/%d %s -> %s"):format(i, #recordings, act.tower, ret))
                 else
                     failN = failN + 1
                     if act.realUid then failedUid[act.realUid] = true end
@@ -485,19 +656,15 @@ function startPlayback()
                 end
             else
                 local ok, ret = runTowerAction(act, failedUid)
-                if ok then
-                    okN = okN + 1
-                    log(("%s %d ok"):format(act.kind, i))
-                elseif ret == "skip" then
-                    skipN = skipN + 1
-                else
-                    failN = failN + 1
-                    log(("%s 失败 %d ret=%s"):format(act.kind, i, tostring(ret)))
-                end
+                if ok then okN = okN + 1
+                elseif ret == "skip" then skipN = skipN + 1
+                else failN = failN + 1 end
             end
             task.wait(ACTION_GAP)
         end
-        finishPlayback(("状态: 🟢 结束 成功%d 失败%d"):format(okN, failN))
+
+        finishPlayback(("状态: 🟢 结束 成功%d 失败%d 跳过%d"):format(okN, failN, skipN))
+        log(("回放结束 ok=%d fail=%d skip=%d"):format(okN, failN, skipN))
     end)
 end
 
@@ -510,96 +677,146 @@ function stopPlayback()
 end
 
 --==================== 自动捡道具 ====================
-Workspace:WaitForChild("ItemDrops", 10)
-local itemDropsFolder = Workspace:FindFirstChild("ItemDrops")
-
-if itemDropsFolder then
-    itemDropsFolder.DescendantAdded:Connect(function(item)
-        if not autoPickItem or not item:IsA("Model") then return end
+task.spawn(function()
+    local folder = Workspace:WaitForChild("ItemDrops", 30)
+    if not folder then return end
+    folder.DescendantAdded:Connect(function(item)
+        if not cfg.autoPickItem or not item:IsA("Model") then return end
         task.wait(0.1)
-        if not autoPickItem or not item.Parent then return end
-        
-        local targetPos = item.PrimaryPart and item.PrimaryPart.Position or (pcall(function() return item:GetPivot().Position end) and item:GetPivot().Position)
+        if not cfg.autoPickItem or not item.Parent then return end
+        local pos = item.PrimaryPart and item.PrimaryPart.Position
+        if not pos then
+            local ok, pivot = pcall(function() return item:GetPivot().Position end)
+            if ok then pos = pivot end
+        end
         local char = player.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        
-        if targetPos and hrp then
-            local returnPos = hrp.CFrame
-            hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
+        if pos and hrp then
+            local back = hrp.CFrame
+            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 2, 0))
             log("⭐ 发现道具，已瞬移拾取")
             task.wait(0.3)
-            if autoPickItem and hrp and hrp.Parent then hrp.CFrame = returnPos end
+            if cfg.autoPickItem and hrp and hrp.Parent then hrp.CFrame = back end
         end
     end)
+end)
+
+--==================== 结算面板检测 ====================
+local RESULT_KEYWORDS = { "result", "victory", "defeat", "gameover", "endscreen", "reward", "summary", "结算" }
+
+local function isResultsVisible()
+    for _, gui in ipairs(playerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Enabled then
+            for _, d in ipairs(gui:GetDescendants()) do
+                if d:IsA("GuiObject") and isVisibleDeep(d) then
+                    local lower = d.Name:lower()
+                    for _, kw in ipairs(RESULT_KEYWORDS) do
+                        if string.find(lower, kw, 1, true) then return true, d.Name end
+                    end
+                end
+            end
+        end
+    end
+    return false
 end
 
---==================== 自动化循环 (生命周期版) ====================
+--==================== 自动化循环（生命周期状态机） ====================
 task.spawn(function()
-    local firedRound = false
-    local lastVote, lastReady, lastRejoin = 0, 0, 0
-    local hasSentReady = false 
-    
-    local voteCooldown = 0     
+    local round = {
+        readyOpen   = false,
+        fired       = false,   -- 本局是否已触发回放
+        sentReady   = false,   -- 本局是否已发 ReadyUp
+        rejoined    = false,   -- 是否已发重开
+        lastVote    = 0,
+        voteCooldown= 0,
+        lastRejoin  = 0,
+    }
+
+    local readyFrameRef = nil
+    local function getReadyFrame()
+        if readyFrameRef and readyFrameRef.Parent and readyFrameRef:IsDescendantOf(playerGui) then
+            return readyFrameRef
+        end
+        readyFrameRef = findByName(playerGui, "ReadyFrame")
+        return readyFrameRef
+    end
 
     while true do
         task.wait(0.2)
-        if not isRecording then
-            local now = os.clock()
-            
-            -- 1. 自动重开：一旦发送重开，立刻把所有局内状态清空，防止带到下一局
-            if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
-                lastRejoin = now
-                pcall(function() ResultsAction:FireServer("Rejoin") end)
-                
-                -- 【彻底重置生命周期】
-                hasSentReady = false
-                voteCooldown = 0
-                firedRound = false
-                log("🔄 已发送重开，所有状态清零重置")
-            end
 
-            -- 2. 自动投票逻辑 (带3秒检测 + 30秒休眠)
-            if autoVote and CastDifficultyVote then
-                if now >= voteCooldown and now - lastVote >= 3 then
-                    lastVote = now
-                    
+        if isRecording then
+            -- 录制期间不跑自动化，防止干扰真实操作
+            round.fired = false
+            round.sentReady = false
+        elseif not isPlaying then
+            local now = os.clock()
+
+            -- 1. 结算后自动重开（只在结算面板可见时触发一次）
+            if cfg.autoRejoin and ResultsAction and not round.rejoined then
+                local vis, panelName = isResultsVisible()
+                if vis and now - round.lastRejoin >= 8 then
+                    round.rejoined = true
+                    round.lastRejoin = now
+                    saveCfg()
+                    log("🏁 结算面板 [" .. tostring(panelName) .. "]，发送重开")
+                    pcall(function() ResultsAction:FireServer("Rejoin") end)
+                end
+            end
+            if not cfg.autoRejoin then round.rejoined = false end
+
+            -- 2. 自动投票（检测到面板才投，投完 30 秒冷却）
+            if cfg.autoVote and CastDifficultyVote and now >= round.voteCooldown then
+                if now - round.lastVote >= 3 then
+                    round.lastVote = now
                     local coreGui = playerGui:FindFirstChild("CoreGui")
                     local diffSelect = coreGui and coreGui:FindFirstChild("DifficultySelect")
                     local holder = diffSelect and diffSelect:FindFirstChild("Holder")
                     local diff1 = holder and holder:FindFirstChild("1Diff")
-                    
                     if diff1 and isVisibleDeep(diff1) then
-                        pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
-                        log("⭐ 发现面板，已投票，30秒冷却")
-                        voteCooldown = now + 30 
+                        pcall(function() CastDifficultyVote:FireServer(cfg.selectedDifficulty) end)
+                        round.voteCooldown = now + 30
+                        log("已投票 " .. tostring(cfg.selectedDifficulty))
                     end
                 end
             end
 
-            -- 3. 准备界面处理
-            local frame = findByName(playerGui, "ReadyFrame")
-            local isReadyUIOpen = frame and isVisibleDeep(frame)
+            -- 3. 准备界面（用「打开/关闭」边沿事件重置本局状态）
+            local frame = getReadyFrame()
+            local open  = frame ~= nil and frame.Parent ~= nil and isVisibleDeep(frame)
 
-            if isReadyUIOpen then
-                if autoReady and not hasSentReady then
-                    hasSentReady = true
-                    if ReadyUp then
+            if open and not round.readyOpen then
+                round.sentReady = false
+                round.fired = false
+                log("准备界面打开，本局状态已重置")
+            elseif not open and round.readyOpen then
+                round.sentReady = false
+                round.fired = false
+                log("准备界面关闭（进入对局）")
+            end
+            round.readyOpen = open
+
+            if open then
+                if cfg.autoReady and not round.sentReady then
+                    round.sentReady = true
+                    local btn = frame:FindFirstChild("ReadyButton", true)
+                    if btn and btn:IsA("TextButton") and isVisibleDeep(btn) then
+                        local ok = pcall(function() firesignal(btn.MouseButton1Click) end)
+                        if not ok and ReadyUp then
+                            pcall(function() ReadyUp:FireServer() end)
+                        end
+                    elseif ReadyUp then
                         pcall(function() ReadyUp:FireServer() end)
-                        log("✅ 已发送 ReadyUp")
                     end
+                    log("✅ 已发送 ReadyUp")
                 end
-                
-                if autoPlayOnReady and not firedRound then
-                    firedRound = true
-                    setStatus(("状态: 🟢 ReadyFrame 出现，%.1f 秒后回放"):format(replayDelay))
-                    task.wait(replayDelay)
-                    if not isRecording then
-                        if isPlaying then stopPlayback() task.wait(0.3) end
-                        startPlayback()
-                    end
+
+                if cfg.autoPlayOnReady and not round.fired then
+                    round.fired = true
+                    setStatus(("状态: 🟢 ReadyFrame 出现，%.1f 秒后回放"):format(cfg.replayDelay))
+                    log("准备回放")
+                    task.wait(cfg.replayDelay)
+                    if not isRecording and not isPlaying then startPlayback() end
                 end
-            else
-                firedRound = false
             end
         end
     end
@@ -607,4 +824,5 @@ end)
 
 --==================== 启动 ====================
 installHook()
-log("脚本加载完成，已恢复上次状态。")
+setStatus(("状态: 就绪  档案[%s]  宏[%s]"):format(tostring(cfg.profile), tostring(currentMacroName)))
+log("脚本加载完成，已恢复配置与上次宏")
