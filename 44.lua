@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v2.9 (修复跨局自动投票 + 完美 UI)
+-- 随机塔防 宏录制/回放 v3.0 (完美投票刷新 + 记忆 + 捡道具)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -181,7 +181,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 2.9",
+    Title = "塔防宏 3.0",
     Author = "Macro + Memory",
     Icon = "shield",
     Background = "rbxassetid://79176013131678", 
@@ -538,43 +538,44 @@ task.spawn(function()
     local firedRound = false
     local lastVote, lastReady, lastRejoin = 0, 0, 0
     local hasSentReady = false 
-    
-    local wasInGame = false -- 新增：记录上一秒是不是在游戏局内
+    local wasVoting = false -- 新增：记录上一秒是否在投票界面
 
     while true do
         task.wait(0.2)
         if not isRecording then
             local now = os.clock()
             
-            -- 检测是否离开了准备/投票界面，进入了游戏内
-            local frame = findByName(playerGui, "ReadyFrame")
-            local isReadyUIOpen = frame and isVisibleDeep(frame)
+            -- 1. 检测投票 UI (VotePanel) 是否出现
+            local coreGui = playerGui:FindFirstChild("CoreGui")
+            local diffOverlay = coreGui and coreGui:FindFirstChild("DifficultyOverlay")
+            local votePanel = diffOverlay and diffOverlay:FindFirstChild("VotePanel")
+            local isVotingNow = votePanel and isVisibleDeep(votePanel)
 
-            -- 如果我们之前不在游戏里，现在也不在准备UI，说明我们刚进新局，必须立刻重置投票CD！
-            if wasInGame and not isReadyUIOpen then
-                lastVote = 0 
-                hasSentReady = false
-                wasInGame = false
+            -- 2. 【核心修复】：如果刚刚弹出了投票面板，强制重置投票CD，让它立刻投！
+            if isVotingNow and not wasVoting then
+                lastVote = 0
+                log("⭐ 检测到投票面板，开始自动投票")
             end
+            wasVoting = isVotingNow
 
-            -- 自动投票（如果CD重置了，它会立刻投出）
+            -- 3. 自动投票（只要CD转好，或者刚刚重置了CD，就会发送）
             if autoVote and CastDifficultyVote and now - lastVote >= 1 then
                 lastVote = now
                 pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
             end
 
-            -- 自动重开
+            -- 4. 自动重开
             if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
                 lastRejoin = now
                 pcall(function() ResultsAction:FireServer("Rejoin") end)
                 hasSentReady = false 
-                wasInGame = true -- 标记我们准备重开了
             end
 
-            -- 准备界面处理
+            -- 5. 检测准备界面
+            local frame = findByName(playerGui, "ReadyFrame")
+            local isReadyUIOpen = frame and isVisibleDeep(frame)
+
             if isReadyUIOpen then
-                wasInGame = false
-                
                 if autoReady and not hasSentReady then
                     hasSentReady = true
                     if ReadyUp then
@@ -594,6 +595,10 @@ task.spawn(function()
                 end
             else
                 firedRound = false
+                -- 准备界面消失，说明进游戏了，重置准备标记
+                if wasInGame == false then
+                    wasInGame = true 
+                end
             end
         end
     end
