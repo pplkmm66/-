@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v2.4 (带背景 + 自动捡道具 + 状态记忆)
+-- 随机塔防 宏录制/回放 v2.5 (完美内嵌背景 + 记忆 + 捡道具)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -11,7 +11,7 @@ local player      = Players.LocalPlayer
 local playerGui   = player:WaitForChild("PlayerGui")
 
 local SAVE_FOLDER = "TD2_Macro_Data"
-local CONFIG_FILE = "TD2_Macro_Data/config.json" -- ★ 新增：状态保存文件
+local CONFIG_FILE = "TD2_Macro_Data/config.json" 
 
 --==================== Remotes ====================
 local Remotes             = RS:WaitForChild("Remotes", 30)
@@ -39,7 +39,6 @@ local dbLines          = {}
 local dbgParagraph     = nil
 local lastDbRefresh    = 0
 
--- 自动化状态 (带默认值)
 local autoVote           = false
 local autoReady          = false
 local autoPlayOnReady    = false
@@ -47,7 +46,6 @@ local autoRejoin         = false
 local autoPickItem       = false 
 local replayDelay        = 3
 local selectedDifficulty = "Medium"
-local autoPickItem       = false
 
 local CASH_WAIT_MAX = 25   
 local PLACE_RETRY   = 2    
@@ -123,7 +121,7 @@ local function loadAllMacros()
     pcall(function()
         for _, file in ipairs(listfiles(SAVE_FOLDER)) do
             local name = file:match("([^/\\]+)%.json$")
-            if name and name ~= "config" then -- ★ 排除配置文件
+            if name and name ~= "config" then 
                 table.insert(names, name)
                 local ok, data = pcall(function()
                     return HttpService:JSONDecode(readfile(file))
@@ -143,7 +141,6 @@ local function saveCurrentMacro()
     end)
 end
 
--- ★ 读取上次的 UI 状态
 local function loadSettings()
     local settings = {}
     pcall(function()
@@ -154,7 +151,6 @@ local function loadSettings()
     return settings
 end
 
--- ★ 保存当前的 UI 状态
 local function saveSettings()
     local settings = {
         macroName = currentMacroName,
@@ -183,34 +179,14 @@ task.spawn(function()
     end
 end)
 
---==================== 背景贴图挂载 ====================
-local bgGui = Instance.new("ScreenGui")
-bgGui.Name = "CustomBackgroundGui"
-bgGui.ResetOnSpawn = false
-bgGui.DisplayOrder = -1 
-bgGui.IgnoreGuiInset = true
-bgGui.Parent = playerGui
-
-local bgImage = Instance.new("ImageLabel")
-bgImage.Size = UDim2.new(1, 0, 1, 0) 
-bgImage.BackgroundTransparency = 1
-bgImage.ScaleType = Enum.ScaleType.Crop
-bgImage.Image = "rbxassetid://79176013131678" 
-bgImage.ImageTransparency = 0.2 
-bgImage.Parent = bgGui
-
-local bgOverlay = Instance.new("Frame")
-bgOverlay.Size = UDim2.new(1, 0, 1, 0)
-bgOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-bgOverlay.BackgroundTransparency = 0.5
-bgOverlay.BorderSizePixel = 0
-bgOverlay.Parent = bgGui
-
---==================== UI ====================
+--==================== UI (完美内嵌背景) ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 2.4",
+    Title = "塔防宏 2.5",
     Author = "Macro + Memory",
     Icon = "shield",
+    -- ★ 核心修改：把图片填入 WindUI 内部，不再全屏铺
+    Background = "rbxassetid://79176013131678", 
+    BackgroundImageTransparency = 0.3, -- 图片透明一点，看清字
     Transparent = true,
 })
 
@@ -246,11 +222,10 @@ local macroDropdown = MainTab:Dropdown({
             recordings = allMacrosData[opt] or {}
             setStatus(("状态: 已加载 [%s]，%d 个动作"):format(opt, #recordings))
         end
-        saveSettings() -- 自动保存状态
+        saveSettings() 
     end,
 })
 
--- 自动恢复上次选的宏
 if startMacro ~= "新建宏..." then
     currentMacroName = startMacro
     recordings = allMacrosData[startMacro] or {}
@@ -297,7 +272,7 @@ recordToggle = MainTab:Toggle({
             recordings = {}
             uidMap = {}
             isRecording = true
-            setStatus("状态: 🔴 录制中（正常放塔/升级/卖塔即可）")
+            setStatus("状态: 🔴 录制中...")
             log("开始录制 [" .. currentMacroName .. "]")
         else
             isRecording = false
