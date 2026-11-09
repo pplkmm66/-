@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v2.6 (完美内嵌背景 + 记忆 + 捡道具)
+-- 随机塔防 宏录制/回放 v2.7 (完美 UI 背景收尾版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -179,14 +179,16 @@ task.spawn(function()
     end
 end)
 
---==================== UI (完美内嵌背景) ====================
+--==================== UI ====================
+-- 【核心修复】：不再全屏，把背景图 ID 直接交给 WindUI 处理
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 2.6",
+    Title = "塔防宏 2.7",
     Author = "Macro + Memory",
     Icon = "shield",
-    -- ★ 完美修复：将背景图直接塞进 WindUI 内部，不糊屏幕
+    
+    -- 原生背景图，只在UI框内部生效
     Background = "rbxassetid://79176013131678", 
-    BackgroundImageTransparency = 0.3, 
+    BackgroundImageTransparency = 0.3, -- 透明度，保证看字清晰
     Transparent = true,
 })
 
