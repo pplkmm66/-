@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v5.2 (终极完美版，精准判定胜负+UI点击)
+-- 随机塔防 宏录制/回放 v5.2 (暴力重开5秒版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -145,7 +145,7 @@ local function log(msg)
     end
 end
 
---==================== 宏存档 & Profile ====================
+--==================== 宏存档 ====================
 local function loadAllMacros()
     local names = { "新建宏..." }
     pcall(function()
@@ -169,7 +169,9 @@ local function saveCurrentMacro()
     writeJson(SAVE_FOLDER .. "/" .. currentMacroName .. ".json", recordings)
 end
 
+--==================== Profile ====================
 local profileDirty = false
+local pendingProfileName = nil
 local profileStateParagraph = nil
 
 local function listProfiles()
@@ -351,7 +353,7 @@ local uiDropdowns = {}
 local uiInputs    = {}
 
 uiToggles.autoVote = AutoTab:Toggle({
-    Title = "自动投票 (自动点击卡片)",
+    Title = "自动投票",
     Value = cfg.autoVote,
     Callback = function(v) cfg.autoVote = v; saveCfg(); markDirty() end,
 })
@@ -376,7 +378,7 @@ uiToggles.autoPlayOnReady = AutoTab:Toggle({
 })
 
 uiToggles.autoRejoin = AutoTab:Toggle({
-    Title = "结算后自动重开下一局",
+    Title = "打完后自动重开下一局",
     Value = cfg.autoRejoin,
     Callback = function(v) cfg.autoRejoin = v; saveCfg(); markDirty() end,
 })
@@ -399,7 +401,7 @@ uiInputs.replayDelay = AutoTab:Input({
     end,
 })
 
---==================== 配置档案 ====================
+--==================== 配置档案（Profile） ====================
 ConfTab:Section({ Title = "Profile" })
 
 profileStateParagraph = ConfTab:Paragraph({
@@ -460,7 +462,7 @@ ConfTab:Button({
 })
 
 ConfTab:Button({
-    Title = "Reset to default",
+    Title = "Reset to default（全部关闭）",
     Callback = function()
         local keepProfile = cfg.profile
         for k, v in pairs(DEFAULT_CFG) do cfg[k] = v end
@@ -470,7 +472,7 @@ ConfTab:Button({
         applyCfgToUI()
         profileDirty = true
         refreshProfileState()
-        log("已重置为默认")
+        log("已重置为默认（全部功能关闭）")
         setStatus("状态: 已重置为默认")
     end,
 })
@@ -491,6 +493,30 @@ DbgTab:Button({
     end,
 })
 
+DbgTab:Button({
+    Title = "扫描可见界面（找结算面板名）",
+    Callback = function()
+        local names, seen = {}, {}
+        local count = 0
+        for _, gui in ipairs(playerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled then
+                table.insert(names, "[ScreenGui] " .. gui.Name)
+                for _, d in ipairs(gui:GetDescendants()) do
+                    if d:IsA("GuiObject") and isVisibleDeep(d) and not seen[d.Name] then
+                        seen[d.Name] = true
+                        table.insert(names, d.Name)
+                        count = count + 1
+                        if count > 50 then break end
+                    end
+                end
+            end
+        end
+        log("可见界面: " .. table.concat(names, ", "))
+        setStatus("状态: 界面名已打印到日志")
+    end,
+})
+
+--==================== 配置同步到 UI ====================
 function applyCfgToUI()
     suppressDirty = true
     for key, w in pairs(uiToggles) do
@@ -671,7 +697,7 @@ task.spawn(function()
     end)
 end)
 
---==================== 自动化循环 (完美生命周期) ====================
+--==================== 自动化循环（生命周期状态机） ====================
 task.spawn(function()
     local round = {
         readyOpen   = false,
@@ -700,69 +726,43 @@ task.spawn(function()
         elseif not isPlaying then
             local now = os.clock()
 
-            -- 1. 【终极修复】：利用你提供的路径，精准判断胜负并点击重开按钮
-            if cfg.autoRejoin and now - round.lastRejoin >= 3 then
-                local uiCore = playerGui:FindFirstChild("CoreGui") -- 注意玩家界面的父级
-                if uiCore then
-                    local winUI = uiCore:FindFirstChild("Win")
-                    local defeatUI = uiCore:FindFirstChild("Defeat")
-                    
-                    local rejoinBtn = nil
-                    if winUI and winUI:FindFirstChild("Content") then
-                        rejoinBtn = winUI.Content:FindFirstChild("RejoinButton")
-                    elseif defeatUI and defeatUI:FindFirstChild("Content") then
-                        rejoinBtn = defeatUI.Content:FindFirstChild("RejoinButton")
-                    end
-
-                    if rejoinBtn and rejoinBtn:IsA("GuiButton") and isVisibleDeep(rejoinBtn) then
-                        round.lastRejoin = now
-                        log("🏁 检测到结算界面，自动点击重新加入")
-                        local ok = pcall(function() firesignal(rejoinBtn.MouseButton1Click) end)
-                        if not ok then
-                            -- 如果信号点不了，直接补发底层重开包
-                            pcall(function() ResultsAction:FireServer("Rejoin") end)
-                        end
-                    end
+            -- 1. 暴力重开机制：只要打开了开关，每5秒强行发一次重开包
+            if cfg.autoRejoin and ResultsAction then
+                if now - round.lastRejoin >= 5 then
+                    round.lastRejoin = now
+                    log("🔄 自动重开：发送 ResultsAction(Rejoin)")
+                    pcall(function() ResultsAction:FireServer("Rejoin") end)
                 end
             end
 
-            -- 2. 自动投票 (改为点击 UI 卡片模式)
-            if cfg.autoVote and now >= round.voteCooldown then
+            -- 2. 自动投票（检测到面板才投，投完 30 秒冷却）
+            if cfg.autoVote and CastDifficultyVote and now >= round.voteCooldown then
                 if now - round.lastVote >= 3 then
                     round.lastVote = now
                     local coreGui = playerGui:FindFirstChild("CoreGui")
                     local diffSelect = coreGui and coreGui:FindFirstChild("DifficultySelect")
                     local holder = diffSelect and diffSelect:FindFirstChild("Holder")
-                    
-                    if holder then
-                        local diff1 = holder:FindFirstChild("1Diff")
-                        if diff1 and isVisibleDeep(diff1) then
-                            -- 优先尝试直接发包
-                            pcall(function() CastDifficultyVote:FireServer(cfg.selectedDifficulty) end)
-                            
-                            -- 如果发包被服务器无视，则尝试模拟物理点击那个 AcceptVote 按钮
-                            local acceptBtn = findByName(diff1, "AcceptVote")
-                            if acceptBtn and acceptBtn:IsA("GuiButton") then
-                                pcall(function() firesignal(acceptBtn.MouseButton1Click) end)
-                            end
-                            
-                            round.voteCooldown = now + 30
-                            log("已尝试投票: " .. tostring(cfg.selectedDifficulty))
-                        end
+                    local diff1 = holder and holder:FindFirstChild("1Diff")
+                    if diff1 and isVisibleDeep(diff1) then
+                        pcall(function() CastDifficultyVote:FireServer(cfg.selectedDifficulty) end)
+                        round.voteCooldown = now + 30
+                        log("已投票 " .. tostring(cfg.selectedDifficulty))
                     end
                 end
             end
 
-            -- 3. 准备界面状态管理
+            -- 3. 准备界面
             local frame = getReadyFrame()
             local open  = frame ~= nil and frame.Parent ~= nil and isVisibleDeep(frame)
 
             if open and not round.readyOpen then
                 round.sentReady = false
                 round.fired = false
+                log("准备界面打开，本局状态已重置")
             elseif not open and round.readyOpen then
                 round.sentReady = false
                 round.fired = false
+                log("准备界面关闭（进入对局）")
             end
             round.readyOpen = open
 
@@ -784,6 +784,7 @@ task.spawn(function()
                 if cfg.autoPlayOnReady and not round.fired then
                     round.fired = true
                     setStatus(("状态: 🟢 ReadyFrame 出现，%.1f 秒后回放"):format(cfg.replayDelay))
+                    log("准备回放")
                     task.wait(cfg.replayDelay)
                     if not isRecording and not isPlaying then startPlayback() end
                 end
