@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v3.0 (完美投票刷新 + 记忆 + 捡道具)
+-- 随机塔防 宏录制/回放 v3.1 (带投票防刷屏冷却)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -181,7 +181,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title = "塔防宏 3.0",
+    Title = "塔防宏 3.1",
     Author = "Macro + Memory",
     Icon = "shield",
     Background = "rbxassetid://79176013131678", 
@@ -538,40 +538,47 @@ task.spawn(function()
     local firedRound = false
     local lastVote, lastReady, lastRejoin = 0, 0, 0
     local hasSentReady = false 
-    local wasVoting = false -- 新增：记录上一秒是否在投票界面
+    
+    -- 【核心修改】：投票检测锁定状态
+    local voteCooldown = 0     -- 记录冷却结束的时间戳
+    local lastVoteCheck = 0    -- 记录上次检测的时间戳
 
     while true do
         task.wait(0.2)
         if not isRecording then
             local now = os.clock()
             
-            -- 1. 检测投票 UI (VotePanel) 是否出现
-            local coreGui = playerGui:FindFirstChild("CoreGui")
-            local diffOverlay = coreGui and coreGui:FindFirstChild("DifficultyOverlay")
-            local votePanel = diffOverlay and diffOverlay:FindFirstChild("VotePanel")
-            local isVotingNow = votePanel and isVisibleDeep(votePanel)
-
-            -- 2. 【核心修复】：如果刚刚弹出了投票面板，强制重置投票CD，让它立刻投！
-            if isVotingNow and not wasVoting then
-                lastVote = 0
-                log("⭐ 检测到投票面板，开始自动投票")
+            -- 1. 自动投票逻辑（带3秒检测 + 30秒休眠机制）
+            if autoVote and CastDifficultyVote then
+                -- 如果冷却时间已过，去检测面板
+                if now >= voteCooldown and now - lastVoteCheck >= 3 then
+                    lastVoteCheck = now
+                    
+                    local coreGui = playerGui:FindFirstChild("CoreGui")
+                    local diffOverlay = coreGui and coreGui:FindFirstChild("DifficultyOverlay")
+                    local votePanel = diffOverlay and diffOverlay:FindFirstChild("VotePanel")
+                    
+                    if votePanel and isVisibleDeep(votePanel) then
+                        -- 发现了面板！立刻投票
+                        pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
+                        log("⭐ 发现投票面板，已投票，进入30秒休眠")
+                        
+                        -- 锁定30秒内不再检测和投票
+                        voteCooldown = now + 30 
+                        lastVote = now
+                    end
+                end
             end
-            wasVoting = isVotingNow
 
-            -- 3. 自动投票（只要CD转好，或者刚刚重置了CD，就会发送）
-            if autoVote and CastDifficultyVote and now - lastVote >= 1 then
-                lastVote = now
-                pcall(function() CastDifficultyVote:FireServer(selectedDifficulty) end)
-            end
-
-            -- 4. 自动重开
+            -- 2. 自动重开
             if autoRejoin and ResultsAction and now - lastRejoin >= 3 then
                 lastRejoin = now
                 pcall(function() ResultsAction:FireServer("Rejoin") end)
                 hasSentReady = false 
+                voteCooldown = 0 -- 重开新局，解除投票冷却
             end
 
-            -- 5. 检测准备界面
+            -- 3. 准备界面处理
             local frame = findByName(playerGui, "ReadyFrame")
             local isReadyUIOpen = frame and isVisibleDeep(frame)
 
@@ -595,10 +602,6 @@ task.spawn(function()
                 end
             else
                 firedRound = false
-                -- 准备界面消失，说明进游戏了，重置准备标记
-                if wasInGame == false then
-                    wasInGame = true 
-                end
             end
         end
     end
