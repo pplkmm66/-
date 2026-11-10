@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 忍者版1.0
+-- 随机塔防 宏录制/回放 忍者版1.1 (适配最新难度)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -220,7 +220,7 @@ task.spawn(function()
     end
 end)
 
---==================== 后台队列刷新线程 (忍者核心修复) ====================
+--==================== 后台队列刷新线程 ====================
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -243,10 +243,9 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title    = "忍者版1.0",
+    Title    = "忍者版1.1",
     Author   = "Ninja Fix",
     Icon     = "shield",
-    -- 修改了背景图片 ID，保持之前的处理方式
     Background = "rbxassetid://125060338684123",
     BackgroundImageTransparency = 0.3,
     Transparent = true,
@@ -390,9 +389,10 @@ uiToggles.autoVote = AutoTab:Toggle({
     Callback = function(v) cfg.autoVote = v; saveCfg(); markDirty() end,
 })
 
+-- ★ 已修改为你截图里的四个真实难度
 uiDropdowns.selectedDifficulty = AutoTab:Dropdown({
     Title = "投票难度",
-    Values = { "Easy", "Medium", "Hard", "Insane" },
+    Values = { "Easy", "Medium", "Hard", "Nightmare" },
     Value = cfg.selectedDifficulty,
     Callback = function(o) cfg.selectedDifficulty = o; saveCfg(); markDirty() end,
 })
@@ -557,7 +557,7 @@ end
 
 applyCfgToUI()
 
---==================== 录制 Hook (忍者完美兼容版) ====================
+--==================== 录制 Hook ====================
 local function installHook()
     pcall(function()
         if getgenv().TD2_OLD_NAMECALL then
