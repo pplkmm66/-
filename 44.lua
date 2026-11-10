@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v5.3 (彻底死等金币版)
+-- 随机塔防 宏录制/回放 v5.4 (自动倍速版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -29,6 +29,7 @@ local RequestTowerSell    = Functions and Functions:WaitForChild("RequestTowerSe
 local CastDifficultyVote  = Events and Events:WaitForChild("CastDifficultyVote", 30)
 local ReadyUp             = Events and Events:WaitForChild("ReadyUp", 30)
 local ResultsAction       = Events and Events:WaitForChild("ResultsAction", 30)
+local SpeedToggle         = Events and Events:WaitForChild("SpeedToggle", 30) -- ★ 新增倍速 Remote
 
 --==================== 配置 ====================
 local DEFAULT_CFG = {
@@ -37,6 +38,8 @@ local DEFAULT_CFG = {
     autoPlayOnReady  = false,
     autoRejoin       = false, 
     autoPickItem     = false,
+    autoSpeed        = false, -- ★ 新增：自动倍速
+    gameSpeed        = "1",   -- ★ 新增：倍速档位
     replayDelay      = 3,
     selectedDifficulty = "Medium",
     verbose          = true,
@@ -81,7 +84,7 @@ local dbLines          = {}
 local dbgParagraph     = nil
 local lastDbRefresh    = 0
 
-local PLACE_RETRY   = 3 -- 失败重试次数稍微调高
+local PLACE_RETRY   = 3
 local ACTION_GAP    = 0.08
 
 local startPlayback, stopPlayback
@@ -217,8 +220,8 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title    = "塔防宏 5.3",
-    Author   = "Macro + Profile",
+    Title    = "塔防宏 5.4",
+    Author   = "Macro + Speed",
     Icon     = "shield",
     Background = "rbxassetid://79176013131678",
     BackgroundImageTransparency = 0.3,
@@ -388,6 +391,20 @@ uiToggles.autoPickItem = AutoTab:Toggle({
     Callback = function(v) cfg.autoPickItem = v; saveCfg(); markDirty() end,
 })
 
+-- ★ 新增：自动倍速 UI
+uiToggles.autoSpeed = AutoTab:Toggle({
+    Title = "自动设置倍速",
+    Value = cfg.autoSpeed,
+    Callback = function(v) cfg.autoSpeed = v; saveCfg(); markDirty() end,
+})
+
+uiDropdowns.gameSpeed = AutoTab:Dropdown({
+    Title = "选择倍速档位",
+    Values = { "1", "1.25", "1.5" },
+    Value = tostring(cfg.gameSpeed),
+    Callback = function(o) cfg.gameSpeed = o; saveCfg(); markDirty() end,
+})
+
 uiInputs.replayDelay = AutoTab:Input({
     Title = "回放延迟（秒）",
     Placeholder = tostring(cfg.replayDelay),
@@ -499,7 +516,7 @@ function applyCfgToUI()
         pcall(function() w:Set(cfg[key] == true) end)
     end
     for key, w in pairs(uiDropdowns) do
-        pcall(function() w:Set(cfg[key]) end)
+        pcall(function() w:Set(tostring(cfg[key])) end)
     end
     for key, w in pairs(uiInputs) do
         local v = cfg[key]
@@ -602,7 +619,7 @@ function startPlayback()
         for i, act in ipairs(recordings) do
             if not isPlaying then break end
             
-            -- 【核心修改】：无限死等机制。只要钱不够，绝对不往下走，绝对不超时。
+            -- 无限死等机制
             if act.cash and act.cash > 0 then
                 while isPlaying and liveCash < act.cash do
                     setStatus(("🟡 等钱中 [%d/%d] 需 %d 现 %d"):format(i, #recordings, act.cash, liveCash))
@@ -674,7 +691,7 @@ task.spawn(function()
     end)
 end)
 
---==================== 自动化循环（生命周期状态机） ====================
+--==================== 自动化循环 ====================
 task.spawn(function()
     local round = {
         readyOpen   = false,
@@ -683,6 +700,7 @@ task.spawn(function()
         lastVote    = 0,
         voteCooldown= 0,
         lastRejoin  = 0,
+        lastSpeed   = 0, -- ★ 新增：记录上次切倍速的时间
     }
 
     local readyFrameRef = nil
@@ -703,16 +721,27 @@ task.spawn(function()
         elseif not isPlaying then
             local now = os.clock()
 
-            -- 1. 暴力重开机制：只要打开了开关，每5秒强行发一次重开包
+            -- ★ 新增：自动设置倍速（每 10 秒发一次，防止刚进游戏还没加载出来）
+            if cfg.autoSpeed and SpeedToggle then
+                if now - round.lastSpeed >= 10 then
+                    round.lastSpeed = now
+                    local speedVal = tonumber(cfg.gameSpeed) or 1
+                    pcall(function() SpeedToggle:FireServer(speedVal) end)
+                    log("⚡ 已尝试设置倍速为: " .. tostring(speedVal))
+                end
+            end
+
+            -- 1. 暴力重开机制
             if cfg.autoRejoin and ResultsAction then
                 if now - round.lastRejoin >= 5 then
                     round.lastRejoin = now
                     log("🔄 自动重开：发送 ResultsAction(Rejoin)")
                     pcall(function() ResultsAction:FireServer("Rejoin") end)
+                    round.lastSpeed = 0 -- 重开新局，立刻重置倍速发送CD
                 end
             end
 
-            -- 2. 自动投票（检测到面板才投，投完 30 秒冷却）
+            -- 2. 自动投票
             if cfg.autoVote and CastDifficultyVote and now >= round.voteCooldown then
                 if now - round.lastVote >= 3 then
                     round.lastVote = now
@@ -740,6 +769,7 @@ task.spawn(function()
                 round.sentReady = false
                 round.fired = false
                 log("准备界面关闭（进入对局）")
+                round.lastSpeed = 0 -- 进入游戏了，立刻重置倍速发送CD，确保秒切倍速
             end
             round.readyOpen = open
 
