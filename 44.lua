@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 v5.2 (暴力重开5秒版)
+-- 随机塔防 宏录制/回放 v5.3 (彻底死等金币版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -81,8 +81,7 @@ local dbLines          = {}
 local dbgParagraph     = nil
 local lastDbRefresh    = 0
 
-local CASH_WAIT_MAX = 25
-local PLACE_RETRY   = 2
+local PLACE_RETRY   = 3 -- 失败重试次数稍微调高
 local ACTION_GAP    = 0.08
 
 local startPlayback, stopPlayback
@@ -218,7 +217,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title    = "塔防宏 5.2",
+    Title    = "塔防宏 5.3",
     Author   = "Macro + Profile",
     Icon     = "shield",
     Background = "rbxassetid://79176013131678",
@@ -493,29 +492,6 @@ DbgTab:Button({
     end,
 })
 
-DbgTab:Button({
-    Title = "扫描可见界面（找结算面板名）",
-    Callback = function()
-        local names, seen = {}, {}
-        local count = 0
-        for _, gui in ipairs(playerGui:GetChildren()) do
-            if gui:IsA("ScreenGui") and gui.Enabled then
-                table.insert(names, "[ScreenGui] " .. gui.Name)
-                for _, d in ipairs(gui:GetDescendants()) do
-                    if d:IsA("GuiObject") and isVisibleDeep(d) and not seen[d.Name] then
-                        seen[d.Name] = true
-                        table.insert(names, d.Name)
-                        count = count + 1
-                        if count > 50 then break end
-                    end
-                end
-            end
-        end
-        log("可见界面: " .. table.concat(names, ", "))
-        setStatus("状态: 界面名已打印到日志")
-    end,
-})
-
 --==================== 配置同步到 UI ====================
 function applyCfgToUI()
     suppressDirty = true
@@ -625,10 +601,11 @@ function startPlayback()
 
         for i, act in ipairs(recordings) do
             if not isPlaying then break end
+            
+            -- 【核心修改】：无限死等机制。只要钱不够，绝对不往下走，绝对不超时。
             if act.cash and act.cash > 0 then
-                local deadline = os.clock() + CASH_WAIT_MAX
-                while isPlaying and liveCash < act.cash and os.clock() < deadline do
-                    setStatus(("🟡 等钱 %d/%d 需 %d 现 %d"):format(i, #recordings, act.cash, liveCash))
+                while isPlaying and liveCash < act.cash do
+                    setStatus(("🟡 等钱中 [%d/%d] 需 %d 现 %d"):format(i, #recordings, act.cash, liveCash))
                     task.wait(0.1)
                 end
             end
