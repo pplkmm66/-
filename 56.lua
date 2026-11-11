@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 忍者版1.3 (修复死线程+技能坐标+双投票+精准重开)
+-- 随机塔防 宏录制/回放 忍者版1.5 (智能捕捉+物理传送)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -93,7 +93,7 @@ local ACTION_GAP    = 0.08
 
 local startPlayback, stopPlayback
 
---==================== 工具 (参数打包/解包) ====================
+--==================== 工具 ====================
 local function guid()
     local ok, id = pcall(function() return HttpService:GenerateGUID(false) end)
     if ok and type(id) == "string" and #id >= 32 then return id:lower() end
@@ -140,7 +140,7 @@ local function isVisibleDeep(obj)
     return true
 end
 
--- ★ 参数编解码（支持坐标打包）
+-- 参数编解码
 local function encodeArgs(...)
     local n = select("#", ...)
     local out = { n = n }
@@ -168,6 +168,18 @@ local function decodeArgs(packed)
         end
     end
     return out, n
+end
+
+-- 寻找塔的模型
+local function findTowerModelByUuid(uuid)
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if d:IsA("Model") then
+            if d.Name == uuid then return d end
+            local ok, hasAttr = pcall(function() return d:GetAttribute("UUID") == uuid end)
+            if ok and hasAttr then return d end
+        end
+    end
+    return nil
 end
 
 local function log(msg)
@@ -254,7 +266,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title    = "忍者版1.3",
+    Title    = "忍者版1.5",
     Author   = "Ninja Fix",
     Icon     = "shield",
     Background = "rbxassetid://125060338684123",
@@ -567,7 +579,7 @@ end
 
 applyCfgToUI()
 
--- ★★★ 核心修复：把刷新线程放在 setStatus 定义之后 ★★★
+-- 后台队列刷新线程
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -641,18 +653,42 @@ local function installHook()
             return ret
         end
         
-        -- ★ 技能完整录制
+        -- 技能录制（带智能坐标捕捉）
         if name == "RequestTowerAbility" or name == "UpdateAbilityAutoUse" then
+            local a1 = ...
             local ret = oldNamecall(self, ...)
             local packed = encodeArgs(...)
+            
+            local act = {
+                kind   = (name == "RequestTowerAbility") and "ability" or "auto_ability",
+                method = method,
+                args   = packed,
+                cash   = liveCash,
+                retUid = (type(ret) == "string" and #ret >= 32) and ret or nil,
+            }
+            
+            task.spawn(function()
+                local uuid = tostring(a1)
+                local towerModel = findTowerModelByUuid(uuid)
+                if towerModel and towerModel.PrimaryPart then
+                    local originalPos = towerModel:GetPivot().Position
+                    
+                    -- 10秒雷达监控，检测位移超过2格
+                    local startTime = os.clock()
+                    while isRecording and os.clock() - startTime < 10 do
+                        task.wait(0.1)
+                        local currentPos = towerModel:GetPivot().Position
+                        if (currentPos - originalPos).Magnitude > 2 then
+                            act.postPos = { currentPos:GetComponents() }
+                            log("📍 成功捕捉到技能传送落点")
+                            break
+                        end
+                    end
+                end
+            end)
+
             pcall(function()
-                recordQueue[#recordQueue + 1] = {
-                    kind   = (name == "RequestTowerAbility") and "ability" or "auto_ability",
-                    method = method,
-                    args   = packed,
-                    cash   = liveCash,
-                    retUid = (type(ret) == "string" and #ret >= 32) and ret or nil,
-                }
+                recordQueue[#recordQueue + 1] = act
             end)
             return ret
         end
@@ -676,7 +712,6 @@ local function placeOnce(act)
 end
 
 local function runTowerAction(act, failedUid)
-    -- ★ 通用参数回放技能
     if act.kind == "ability" or act.kind == "auto_ability" then
         local args, argc
         if act.args then
@@ -704,10 +739,21 @@ local function runTowerAction(act, failedUid)
             if act.args and act.args[1] then uidMap[act.args[1]] = ret end
             if act.retUid then uidMap[act.retUid] = ret end
         end
+        
+        -- 物理移动塔
+        if ok and act.postPos then
+            task.wait(0.3) 
+            local newUuid = (type(ret) == "string" and #ret >= 32) and ret or args[1]
+            local towerModel = findTowerModelByUuid(newUuid)
+            if towerModel and towerModel.PrimaryPart then
+                towerModel:PivotTo(CFrame.new(Vector3.new(unpack(act.postPos))))
+                log(("🚀 技能释放，已物理传送塔到目标点"))
+            end
+        end
+        
         return ok, ret
     end
 
-    -- 普通升级/卖塔
     if not act.uid or failedUid[act.uid] then return false, "skip" end
     local target = uidMap[act.uid]
     if not target then return false, "skip" end
@@ -769,7 +815,6 @@ function startPlayback()
                     log(("放塔失败 %d %s ret=%s"):format(i, act.tower, tostring(ret)))
                 end
             else
-                -- ★ 技能重试机制
                 local ok, ret
                 for _ = 1, 3 do
                     ok, ret = runTowerAction(act, failedUid)
@@ -861,7 +906,7 @@ task.spawn(function()
                 end
             end
 
-            -- 1. 智能重开机制
+            -- 智能重开机制
             if cfg.autoRejoin and ResultsAction then
                 local winContent = game:GetService("StarterGui"):FindFirstChild("Win")
                 winContent = winContent and winContent:FindFirstChild("Content")
@@ -879,7 +924,7 @@ task.spawn(function()
                 end
             end
 
-            -- 2. 图1图2双路并发检测投票
+            -- 图1图2双路并发检测投票
             if cfg.autoVote and CastDifficultyVote and now >= round.voteCooldown then
                 if now - round.lastVote >= 3 then
                     round.lastVote = now
