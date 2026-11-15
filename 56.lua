@@ -1,5 +1,10 @@
+没问题，我已经把下拉框里的倍速选项和对应的发包数值更新成了你想要的 1、1.5、2。
+
+直接复制下面这版完整代码运行：
+
+```lua
 --==============================================================
--- 随机塔防 宏录制/回放 忍者版1.5 (技能4秒采样版)
+-- 随机塔防 宏录制/回放 忍者版1.6 (适配新倍速档位)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -264,7 +269,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title    = "忍者版1.5",
+    Title    = "忍者版1.6",
     Author   = "Ninja Fix",
     Icon     = "shield",
     Background = "rbxassetid://125060338684123",
@@ -449,7 +454,8 @@ uiToggles.autoSpeed = AutoTab:Toggle({
 
 uiDropdowns.gameSpeed = AutoTab:Dropdown({
     Title = "选择倍速档位",
-    Values = { "1", "1.25", "1.5" },
+    -- ★ 已修改：1, 1.5, 2
+    Values = { "1", "1.5", "2" },
     Value = tostring(cfg.gameSpeed),
     Callback = function(o) cfg.gameSpeed = o; saveCfg(); markDirty() end,
 })
@@ -577,7 +583,7 @@ end
 
 applyCfgToUI()
 
--- ★★★ 核心修复：把刷新线程放在 setStatus 定义之后 ★★★
+-- ★★★ 修复后的队列刷新线程 ★★★
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -657,7 +663,7 @@ local function installHook()
             local ret = oldNamecall(self, ...)
             local packed = encodeArgs(...)
             
-            -- 如果是传送类技能，我们等 4 秒抓取塔的最终位置
+            -- 传送类技能，等 4 秒抓取塔的最终位置
             local act = {
                 kind   = (name == "RequestTowerAbility") and "ability" or "auto_ability",
                 method = method,
@@ -666,7 +672,6 @@ local function installHook()
                 retUid = (type(ret) == "string" and #ret >= 32) and ret or nil,
             }
             
-            -- ★ 改为 4 秒后采样最终坐标
             task.delay(4, function()
                 local uuid = tostring(a1)
                 local towerModel = findTowerModelByUuid(uuid)
@@ -729,9 +734,9 @@ local function runTowerAction(act, failedUid)
             if act.retUid then uidMap[act.retUid] = ret end
         end
         
-        -- ★ 物理移动塔（如果录制到了最终坐标）
+        -- ★ 物理移动塔
         if ok and act.postPos then
-            task.wait(0.5) -- 等服务器确认技能状态，留足安全时间
+            task.wait(0.5) 
             local newUuid = (type(ret) == "string" and #ret >= 32) and ret or args[1]
             local towerModel = findTowerModelByUuid(newUuid)
             if towerModel and towerModel.PrimaryPart then
@@ -991,3 +996,4 @@ end)
 installHook()
 setStatus(("状态: 就绪  档案[%s]  宏[%s]"):format(tostring(cfg.profile), tostring(currentMacroName)))
 log("脚本加载完成，已恢复配置与上次宏")
+```
