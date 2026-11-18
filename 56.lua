@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 忍者版1.8 (5秒反宏巡逻版)
+-- 随机塔防 宏录制/回放 忍者版1.9 (暴力反宏秒答版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -265,7 +265,7 @@ end)
 
 --==================== UI ====================
 local Window = WindUI:CreateWindow({
-    Title    = "忍者版1.8",
+    Title    = "忍者版1.9",
     Author   = "Ninja Fix",
     Icon     = "shield",
     Background = "rbxassetid://125060338684123",
@@ -601,7 +601,7 @@ task.spawn(function()
     end
 end)
 
---==================== ★ 智能反宏秒答系统 (5秒巡逻) ★ ====================
+--==================== ★ 终极暴力反宏秒答系统 (5秒巡逻) ★ ====================
 task.spawn(function()
     local lastAnswered = 0
     while true do
@@ -610,60 +610,51 @@ task.spawn(function()
         
         if antiMacroGui and isVisibleDeep(antiMacroGui) then
             if os.clock() - lastAnswered > 3 then
+                log("⚠️ 雷达扫到【反宏弹窗】！正在暴力破解...")
                 
-                -- 寻找存放题目的随机 Frame
-                local containerFrame = nil
-                local targetNumberText = nil
-                local optionsFrame = nil
-                
-                for _, child in ipairs(antiMacroGui:GetChildren()) do
-                    if child:IsA("Frame") and #child.Name >= 8 then
-                        containerFrame = child
-                        break
-                    end
-                end
+                local targetNumber = nil
+                local buttons = {}
+                local allNums = {}
 
-                if containerFrame then
-                    -- 找题目 TextLabel 和选项 Frame
-                    for _, child in ipairs(containerFrame:GetChildren()) do
-                        if child:IsA("TextLabel") and #child.Name >= 8 then
-                            targetNumberText = child.Text
-                        elseif child:IsA("Frame") and child.Name == "Frame" then
-                            -- 选项容器通常里面有 TextButton
-                            for _, subChild in ipairs(child:GetChildren()) do
-                                if subChild:IsA("Frame") and #subChild.Name >= 8 then
-                                    for _, btn in ipairs(subChild:GetChildren()) do
-                                        if btn:IsA("TextButton") then
-                                            optionsFrame = subChild
-                                            break
-                                        end
-                                    end
-                                end
-                                if optionsFrame then break end
+                -- 暴力遍历整个弹窗内所有的数字标签和按钮
+                for _, gui in ipairs(antiMacroGui:GetDescendants()) do
+                    if gui:IsA("TextLabel") or gui:IsA("TextButton") then
+                        local num = tonumber(gui.Text)
+                        if num then
+                            table.insert(allNums, num)
+                            -- 判断如果是按钮
+                            if gui:IsA("TextButton") then
+                                table.insert(buttons, gui)
                             end
                         end
                     end
                 end
 
-                -- 找到了题目和选项，开始比对点击
-                if targetNumberText and optionsFrame then
-                    lastAnswered = os.clock()
-                    local targetNum = tonumber(targetNumberText)
-                    if targetNum then
+                -- 如果里面有两个以上的数字，说明题和选项都有了
+                if #buttons > 0 and #allNums > #buttons then
+                    -- 找出没在按钮里出现的那个数字，或者取最大的那个当题目
+                    targetNumber = allNums[1]
+                    for _, n in ipairs(allNums) do
+                        local isBtn = false
+                        for _, btn in ipairs(buttons) do
+                            if tonumber(btn.Text) == n then isBtn = true break end
+                        end
+                        if not isBtn then targetNumber = n break end
+                    end
+
+                    if targetNumber then
+                        lastAnswered = os.clock()
+                        log("🔍 题目数字找到了: " .. tostring(targetNumber))
                         local clicked = false
-                        for _, btn in ipairs(optionsFrame:GetChildren()) do
-                            if btn:IsA("TextButton") and tonumber(btn.Text) == targetNum then
-                                pcall(function()
-                                    firesignal(btn.MouseButton1Click)
-                                end)
-                                log("✅ 成功秒答反宏校验: " .. tostring(targetNum))
+                        for _, btn in ipairs(buttons) do
+                            if tonumber(btn.Text) == targetNumber then
+                                pcall(function() firesignal(btn.MouseButton1Click) end)
+                                log("✅ 成功自动点击了正确选项: " .. tostring(targetNumber))
                                 clicked = true
                                 break
                             end
                         end
-                        if not clicked then
-                            log("⚠️ 找到了数字但没有对应按钮，可能是 UI 渲染延迟")
-                        end
+                        if not clicked then log("❌ 答案没在按钮里，尝试强制发包...") end
                     end
                 end
             end
