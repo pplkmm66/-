@@ -601,75 +601,300 @@ task.spawn(function()
     end
 end)
 
---==================== ★ 智能反宏秒答系统 ★ ====================
-task.spawn(function()
-    local lastAnswered = 0
-    while true do
-        task.wait(0.5)
-        local antiMacroGui = playerGui:FindFirstChild("AntiMacro")
-        
-        if antiMacroGui and isVisibleDeep(antiMacroGui) then
-            if os.clock() - lastAnswered > 3 then
-                
-                -- 寻找存放题目的随机 Frame
-                local containerFrame = nil
-                local targetNumberText = nil
-                local optionsFrame = nil
-                
-                for _, child in ipairs(antiMacroGui:GetChildren()) do
-                    if child:IsA("Frame") and #child.Name >= 8 then
-                        containerFrame = child
-                        break
+--==================== ★ 智能反宏秒答系统（修复版） ★ ====================
+do
+    local POLL      = 0.15   -- 检查间隔（秒）
+    local RETRY_GAP = 0.60   -- 同一题两次尝试的间隔
+    local MAX_TRY   = 6      -- 同一题最多尝试次数
+
+    local anti = {
+        sig = nil, tries = 0, lastTry = 0,
+        logged = false, seen = false, noMatch = false,
+    }
+
+    -- 文本清洗：去富文本标签、去 nbsp、去掉所有空白
+    local function plain(text)
+        local s = tostring(text or "")
+        s = s:gsub("<[^>]->", "")
+        s = s:gsub("&nbsp;", " ")
+        s = s:gsub("%s+", "")
+        return s
+    end
+
+    local function chain(obj)          -- 祖先链，顺便当层级深度
+        local t, n = {}, obj
+        while n and n ~= playerGui do
+            t[#t + 1] = n
+            n = n.Parent
+        end
+        return t
+    end
+
+    local function shown(obj)          -- 逐级检查 Visible / ScreenGui.Enabled
+        if not obj or not obj.Parent then return false end
+        local node, guard = obj, 0
+        while node and node ~= playerGui and guard < 64 do
+            guard = guard + 1
+            if node:IsA("ScreenGui") then
+                if node.Enabled == false then return false end
+            elseif node:IsA("GuiObject") then
+                if node.Visible == false then return false end
+            end
+            node = node.Parent
+        end
+        return true
+    end
+
+    local function getAntiRoot()
+        local g = playerGui:FindFirstChild("AntiMacro")
+        if g and shown(g) then return g end
+        for _, d in ipairs(playerGui:GetDescendants()) do
+            if d.Name == "AntiMacro" and shown(d) then return d end
+        end
+        return nil
+    end
+
+    local function nearScore(a, b)     -- 最近公共祖先，越小越近
+        local pos = {}
+        for i, v in ipairs(chain(a)) do pos[v] = i end
+        for i, v in ipairs(chain(b)) do
+            if pos[v] then return i + pos[v] end
+        end
+        return math.huge
+    end
+
+    -- 同一个父节点下 >= 2 个可见 TextButton 自动成组（四个选项天然同父）
+    local function collectGroups(root)
+        local function byParent(getParent)
+            local map, order = {}, {}
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("TextButton") and plain(d.Text) ~= "" and shown(d) then
+                    local p = getParent(d)
+                    if p then
+                        if not map[p] then map[p] = {}; order[#order + 1] = p end
+                        table.insert(map[p], d)
                     end
                 end
+            end
+            return map, order
+        end
 
-                if containerFrame then
-                    -- 找题目 TextLabel 和选项 Frame
-                    for _, child in ipairs(containerFrame:GetChildren()) do
-                        if child:IsA("TextLabel") and #child.Name >= 8 then
-                            targetNumberText = child.Text
-                        elseif child:IsA("Frame") and child.Name == "Frame" then
-                            -- 选项容器通常里面有 TextButton
-                            for _, subChild in ipairs(child:GetChildren()) do
-                                if subChild:IsA("Frame") and #subChild.Name >= 8 then
-                                    for _, btn in ipairs(subChild:GetChildren()) do
-                                        if btn:IsA("TextButton") then
-                                            optionsFrame = subChild
-                                            break
-                                        end
-                                    end
-                                end
-                                if optionsFrame then break end
-                            end
-                        end
-                    end
+        local groups = {}
+        local map, order = byParent(function(d) return d.Parent end)
+        for _, p in ipairs(order) do
+            if #map[p] >= 2 then
+                groups[#groups + 1] = { parent = p, buttons = map[p], count = #map[p] }
+            end
+        end
+
+        -- 按钮外面还包了一层 Frame：按祖父节点再分一次
+        if #groups == 0 then
+            local map2, order2 = byParent(function(d) return d.Parent and d.Parent.Parent end)
+            for _, p in ipairs(order2) do
+                if #map2[p] >= 2 then
+                    groups[#groups + 1] = { parent = p, buttons = map2[p], count = #map2[p] }
                 end
+            end
+        end
 
-                -- 找到了题目和选项，开始比对点击
-                if targetNumberText and optionsFrame then
-                    lastAnswered = os.clock()
-                    local targetNum = tonumber(targetNumberText)
-                    if targetNum then
-                        local clicked = false
-                        for _, btn in ipairs(optionsFrame:GetChildren()) do
-                            if btn:IsA("TextButton") and tonumber(btn.Text) == targetNum then
-                                pcall(function()
-                                    firesignal(btn.MouseButton1Click)
-                                end)
-                                log("✅ 成功秒答反宏校验: " .. tostring(targetNum))
-                                clicked = true
-                                break
+        table.sort(groups, function(a, b)
+            local a4, b4 = a.count == 4, b.count == 4
+            if a4 ~= b4 then return a4 end
+            if a.count ~= b.count then return a.count > b.count end
+            return #chain(a.parent) > #chain(b.parent)
+        end)
+        return groups
+    end
+
+    local function collectLabels(root)
+        local list = {}
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("TextLabel") and plain(d.Text) ~= "" and shown(d) then
+                list[#list + 1] = d
+            end
+        end
+        return list
+    end
+
+    -- 三级比对：完全一致 -> 数值相等 -> 提取数字相同
+    local function pickButton(labelText, buttons)
+        local target = plain(labelText)
+        if target == "" then return nil, nil end
+
+        for _, b in ipairs(buttons) do
+            if plain(b.Text) == target then return b, "完全一致" end
+        end
+
+        local tn = tonumber(target)
+        if tn then
+            for _, b in ipairs(buttons) do
+                local bn = tonumber(plain(b.Text))
+                if bn and bn == tn then return b, "数值相等" end
+            end
+        end
+
+        local td = target:match("%d+%.?%d*")
+        if td then
+            for _, b in ipairs(buttons) do
+                local bt = plain(b.Text)
+                if bt == td then return b, "数字相同" end
+                local bd = bt:match("%d+%.?%d*")
+                if bd and bd == td then return b, "数字相同" end
+            end
+        end
+
+        return nil, nil
+    end
+
+    -- 方式一：直接调用 MouseButton1Click / Activated / Down / Up 上的回调
+    local function clickSignal(btn)
+        local names = { "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }
+
+        if type(getconnections) == "function" then
+            for _, n in ipairs(names) do
+                local sig = btn[n]
+                if sig then
+                    local ok, conns = pcall(getconnections, sig)
+                    if ok and type(conns) == "table" and #conns > 0 then
+                        local ran = 0
+                        for _, c in ipairs(conns) do
+                            local fn = c.Function or c.Func
+                            if type(fn) == "function" then
+                                pcall(fn)
+                                ran = ran + 1
                             end
                         end
-                        if not clicked then
-                            log("⚠️ 找到了数字但没有对应按钮，可能是 UI 渲染延迟")
-                        end
+                        if ran > 0 then return true, n .. " (getconnections)" end
                     end
                 end
             end
         end
+
+        for _, n in ipairs(names) do
+            local sig = btn[n]
+            if sig then
+                local ok = pcall(function() firesignal(sig) end)
+                if ok then return true, n .. " (firesignal)" end
+            end
+        end
+        return false, nil
     end
-end)
+
+    -- 方式二：模拟真实鼠标点击（对付只认 UserInputService / Activated 的写法）
+    local function clickMouse(btn)
+        local pos = btn.AbsolutePosition + (btn.AbsoluteSize / 2)
+
+        if type(mousemoveabs) == "function" and type(mouse1click) == "function" then
+            local ok = pcall(function()
+                mousemoveabs(pos.X, pos.Y)
+                task.wait(0.05)
+                mouse1click()
+            end)
+            if ok then return true, "真实鼠标 (mousemoveabs)" end
+        end
+
+        local okVim, VIM = pcall(function()
+            return game:GetService("VirtualInputManager")
+        end)
+        if okVim and VIM then
+            local ok = pcall(function()
+                VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 1)
+                task.wait(0.04)
+                VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+            end)
+            if ok then return true, "VirtualInputManager" end
+        end
+
+        return false, nil
+    end
+
+    task.spawn(function()
+        while true do
+            task.wait(POLL)
+
+            local root = getAntiRoot()
+
+            if not root then
+                anti.sig, anti.tries, anti.logged = nil, 0, false
+                anti.seen, anti.noMatch = false, false
+            else
+                if not anti.seen then
+                    anti.seen = true
+                    log("👀 检测到反宏界面，开始解析")
+                end
+
+                local groups = collectGroups(root)
+                if #groups > 0 then
+                    local labels = collectLabels(root)
+
+                    local chosenBtn, chosenText, how
+                    local best = math.huge
+                    for _, g in ipairs(groups) do
+                        for _, lab in ipairs(labels) do
+                            local b, m = pickButton(lab.Text, g.buttons)
+                            if b then
+                                -- 4 按钮的组优先，其次文本离选项组最近
+                                local sc = nearScore(lab, g.parent) + ((g.count == 4) and 0 or 100)
+                                if sc < best then
+                                    best       = sc
+                                    chosenBtn  = b
+                                    chosenText = lab.Text
+                                    how        = m
+                                end
+                            end
+                        end
+                    end
+
+                    if chosenBtn then
+                        local sig = plain(chosenText) .. "|" .. plain(chosenBtn.Text)
+                        if sig ~= anti.sig then
+                            anti.sig, anti.tries, anti.logged = sig, 0, false
+                        end
+
+                        local now = os.clock()
+                        if anti.tries < MAX_TRY and now - anti.lastTry >= RETRY_GAP then
+                            anti.lastTry = now
+                            anti.tries   = anti.tries + 1
+
+                            local okClick, method
+                            if anti.tries == 1 then
+                                okClick, method = clickSignal(chosenBtn)
+                                if not okClick then
+                                    okClick, method = clickMouse(chosenBtn)
+                                end
+                            elseif anti.tries == 2 then
+                                okClick, method = clickMouse(chosenBtn)
+                            else
+                                okClick, method = clickSignal(chosenBtn)
+                                if not okClick then
+                                    okClick, method = clickMouse(chosenBtn)
+                                end
+                            end
+
+                            if not anti.logged then
+                                anti.logged = true
+                                log(("🎯 反宏命中：题目[%s] 选项[%s] 比对=%s 点击=%s 方式=%s"):format(
+                                    tostring(chosenText), tostring(chosenBtn.Text),
+                                    tostring(how), tostring(okClick), tostring(method)))
+                            end
+                        end
+                    elseif not anti.noMatch then
+                        anti.noMatch = true
+                        local lt, bt = {}, {}
+                        for i, l in ipairs(labels) do
+                            if i <= 8 then lt[#lt + 1] = plain(l.Text) end
+                        end
+                        for _, b in ipairs(groups[1].buttons) do
+                            bt[#bt + 1] = plain(b.Text)
+                        end
+                        log("⚠️ 反宏：找到选项但没匹配上，文本=" .. table.concat(lt, ",")
+                            .. " 按钮=" .. table.concat(bt, ","))
+                    end
+                end
+            end
+        end
+    end)
+end
 
 --==================== 录制 Hook ====================
 local function installHook()
