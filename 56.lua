@@ -1,5 +1,5 @@
 --==============================================================
--- 随机塔防 宏录制/回放 忍者版1.8 (智能反宏秒答版 + 自动重开修复)
+-- 随机塔防 宏录制/回放 忍者版1.8 (智能反宏秒答版)
 --==============================================================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -140,42 +140,6 @@ local function isVisibleDeep(obj)
         o = o.Parent
     end
     return true
-end
-
---==============================================================
--- ★ 修复点 1：把"对局是否结束"抽成公共函数
---   回放线程和自动化循环都要用，所以必须放在两者之前定义。
---   优先查 PlayerGui（运行时真正显示的界面），再兜底查 StarterGui
---   （兼容你原来只查 StarterGui 的写法）。
---==============================================================
-local GAME_OVER_NAMES = {
-    "Win", "Defeat", "Victory", "Lose", "Lost",
-    "Result", "Results", "GameOver", "EndScreen",
-}
-
-local function isGameOver()
-    local sg = game:GetService("StarterGui")
-    for _, root in ipairs({ playerGui, sg }) do
-        for _, name in ipairs(GAME_OVER_NAMES) do
-            local node = root and root:FindFirstChild(name)
-            if node then
-                -- 优先按你原来的写法：Win/Defeat -> Content 可见
-                local content = node:FindFirstChild("Content")
-                if content then
-                    if isVisibleDeep(content)
-                        and (not node:IsA("ScreenGui") or node.Enabled) then
-                        return true, name
-                    end
-                elseif root == playerGui and isVisibleDeep(node)
-                    and (not node:IsA("ScreenGui") or node.Enabled) then
-                    -- 没有 Content 时，只认 PlayerGui 里明确启用的界面，
-                    -- 避免 StarterGui 里的模板把"没开局"误判成结算
-                    return true, name
-                end
-            end
-        end
-    end
-    return false, nil
 end
 
 local function encodeArgs(...)
@@ -1232,10 +1196,6 @@ local function installHook()
     getgenv().TD2_OLD_NAMECALL = oldNamecall
 end
 
--- 顺手补上：你贴出来的版本里定义了 installHook() 却没调用，录制会抓不到任何 Remote。
--- 函数开头已有恢复旧 hook 的保护，重复调用也不会叠 hook。
-installHook()
-
 --==================== 回放 ====================
 local function placeOnce(act)
     local uid = guid()
@@ -1323,47 +1283,18 @@ function startPlayback()
         local failedUid = {}
         local okN, failN, skipN = 0, 0, 0
 
-        --==========================================================
-        -- ★ 修复点 2：回放自己也要能"提前死掉"
-        --   原代码的等钱循环没有超时，对局结束后 liveCash 不再变化，
-        --   线程就永远卡在这里，isPlaying 一直是 true。
-        --==========================================================
-        local WAIT_CASH_MAX = 12  -- 单步等钱上限（秒），可按网速调整
-
         for i, act in ipairs(recordings) do
             if not isPlaying then break end
 
-            -- 每一步先检查：对局是不是已经结束了
-            if isGameOver() then
-                log(("⏹ 第 %d/%d 步时发现对局已结束，中止回放"):format(i, #recordings))
-                break
-            end
-
-            local skipThis = false
             if act.cash and act.cash > 0 then
-                local t0 = os.clock()
                 while isPlaying and liveCash < act.cash do
-                    if isGameOver() then
-                        log("⏹ 等钱时对局已结束，中止回放")
-                        isPlaying = false
-                        break
-                    end
-                    if os.clock() - t0 > WAIT_CASH_MAX then
-                        log(("⏰ 等钱超时 %ds，跳过动作 %d/%d"):format(WAIT_CASH_MAX, i, #recordings))
-                        skipThis = true
-                        break
-                    end
-                    setStatus(("🟡 等钱中 [%d/%d] 需 %d 现 %d (%.0fs)"):format(
-                        i, #recordings, act.cash, liveCash,
-                        WAIT_CASH_MAX - (os.clock() - t0)))
+                    setStatus(("🟡 等钱中 [%d/%d] 需 %d 现 %d"):format(i, #recordings, act.cash, liveCash))
                     task.wait(0.1)
                 end
             end
             if not isPlaying then break end
 
-            if skipThis then
-                skipN = skipN + 1
-            elseif act.kind == "place" then
+            if act.kind == "place" then
                 local ok, ret
                 for _ = 1, PLACE_RETRY do
                     ok, ret = placeOnce(act)
@@ -1436,15 +1367,12 @@ end)
 task.spawn(function()
     local round = {
         readyOpen   = false,
-        fired       = false,
-        sentReady   = false,
+        fired       = false,   
+        sentReady   = false,   
         lastVote    = 0,
         voteCooldown= 0,
         lastRejoin  = 0,
         lastSpeed   = 0,
-        -- ★ 修复点 3 新增状态
-        gameOver      = false,
-        rejoinPending = false,
     }
 
     local readyFrameRef = nil
@@ -1459,54 +1387,35 @@ task.spawn(function()
     while true do
         task.wait(0.2)
 
-        local now = os.clock()
-
-        --==========================================================
-        -- ★ 修复点 3：结算/重开检测移到 isPlaying 判断之外
-        --   每 0.2s 都跑一次，回放中也能发现"对局提前结束"。
-        --==========================================================
-        local over, overName = isGameOver()
-        if over and not round.gameOver then
-            round.gameOver = true
-            log("🏁 检测到结算界面 (" .. tostring(overName) .. ")")
-            -- 对局已经结束，回放再跑下去只会往死局里乱发指令，直接掐断
-            if isPlaying then
-                log("⏹ 对局提前结束，强制中止回放")
-                stopPlayback()
-            end
-        elseif not over and round.gameOver then
-            round.gameOver = false
-            round.rejoinPending = false
-            log("🔄 结算界面消失，视为新一局，状态已重置")
-        end
-
-        -- Rejoin 没成功切图时，20 秒后允许再试一次，避免永久卡住
-        if round.rejoinPending and now - round.lastRejoin >= 20 then
-            round.rejoinPending = false
-            log("🔁 Rejoin 超时未切换，允许重试")
-        end
-
-        if cfg.autoRejoin and ResultsAction and round.gameOver and not round.rejoinPending
-            and now - round.lastRejoin >= 5 then
-            round.lastRejoin = now
-            round.rejoinPending = true
-            log("🏁 发送 Rejoin 重开下一局")
-            pcall(function() ResultsAction:FireServer("Rejoin") end)
-            round.lastSpeed = 0
-            round.sentReady = false
-            round.fired = false
-        end
-
         if isRecording then
             round.fired = false
             round.sentReady = false
         elseif not isPlaying then
+            local now = os.clock()
+
             if cfg.autoSpeed and SpeedToggle then
                 if now - round.lastSpeed >= 10 then
                     round.lastSpeed = now
                     local speedVal = tonumber(cfg.gameSpeed) or 1
                     pcall(function() SpeedToggle:FireServer(speedVal) end)
                     log("⚡ 已尝试设置倍速为: " .. tostring(speedVal))
+                end
+            end
+
+            if cfg.autoRejoin and ResultsAction then
+                local winContent = game:GetService("StarterGui"):FindFirstChild("Win")
+                winContent = winContent and winContent:FindFirstChild("Content")
+                
+                local defeatContent = game:GetService("StarterGui"):FindFirstChild("Defeat")
+                defeatContent = defeatContent and defeatContent:FindFirstChild("Content")
+
+                local isGameOver = (winContent and isVisibleDeep(winContent)) or (defeatContent and isVisibleDeep(defeatContent))
+
+                if isGameOver and now - round.lastRejoin >= 5 then
+                    round.lastRejoin = now
+                    log("🏁 检测到结算界面 (Win/Defeat)，发送 Rejoin 重开")
+                    pcall(function() ResultsAction:FireServer("Rejoin") end)
+                    round.lastSpeed = 0
                 end
             end
 
