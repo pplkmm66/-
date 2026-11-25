@@ -90,6 +90,11 @@ local lastDbRefresh    = 0
 
 local recordQueue = {}
 
+-- 录制 Hook 状态（供诊断，适配新版执行器）
+local hookInstalled = false
+local hookMethod    = "namecall"
+local hookHits      = 0     -- hook 累计触发次数（只要拦到调用就 +1）
+
 local PLACE_RETRY   = 3
 local ACTION_GAP    = 0.08
 
@@ -372,9 +377,11 @@ recordToggle = MainTab:Toggle({
             recordings = {}
             recordQueue = {}
             uidMap = {}
+            hookHits = 0
             isRecording = true
             setStatus("状态: 🔴 录制中...")
-            log("开始录制 [" .. currentMacroName .. "]")
+            log(("开始录制 [%s]，录制Hook=%s"):format(
+                currentMacroName, hookInstalled and "已装" or "未装"))
         else
             isRecording = false
             task.wait(0.2)
@@ -384,7 +391,7 @@ recordToggle = MainTab:Toggle({
             recordQueue = {}
             saveCurrentMacro()
             setStatus(("状态: 已保存 %d 个动作"):format(#recordings))
-            log(("录制结束，共 %d 个动作"):format(#recordings))
+            log(("录制结束，共 %d 个动作，本次Hook拦截 %d 次"):format(#recordings, hookHits))
         end
     end,
 })
@@ -569,6 +576,28 @@ DbgTab:Button({
     Title = "打印当前宏摘要",
     Callback = function()
         log(("宏: %s  动作数: %d"):format(tostring(currentMacroName), #recordings))
+    end,
+})
+
+DbgTab:Button({
+    Title = "检查录制Hook状态",
+    Callback = function()
+        local g = _G
+        pcall(function() if type(getgenv) == "function" then g = getgenv() end end)
+        log(("录制Hook: %s | 方式=%s | 累计拦截=%d | 录制中=%s | 队列=%d"):format(
+            hookInstalled and "已安装" or "未安装",
+            hookMethod, hookHits,
+            tostring(isRecording), #recordQueue))
+        log("提示：开录制后点放塔/升级，再看'累计拦截'是否增长；不增长说明hook没生效")
+    end,
+})
+
+DbgTab:Button({
+    Title = "重新安装录制Hook",
+    Callback = function()
+        hookHits = 0
+        installHook()
+        log("已重新安装录制Hook，累计拦截已清零")
     end,
 })
 
@@ -1107,94 +1136,135 @@ do
     end)
 end
 
---==================== 录制 Hook ====================
-local function installHook()
+--==================== 录制 Hook（适配 新版执行器） ====================
+-- 新版变化应对：
+--  1) getnamecallmethod 在新执行器里可能要给 true 才拿原始方法名，做双方式兼容；
+--  2) 用 getgenv 存旧 hook，重开脚本时先恢复，避免重复叠 hook 导致失效；
+--  3) hook 是否装上、拦到多少调用全部可见，便于诊断"录不进去"。
+local function currentMethod()
+    local m = nil
     pcall(function()
-        if getgenv().TD2_OLD_NAMECALL then
-            hookmetamethod(game, "__namecall", getgenv().TD2_OLD_NAMECALL)
+        m = getnamecallmethod()
+        -- 部分新版实现里无参返回的是被包装过的名字，带 true 才是真实方法名
+        if type(getnamecallmethod(true)) == "string" then
+            m = getnamecallmethod(true)
+        end
+    end)
+    if type(m) ~= "string" then m = "" end
+    return m
+end
+
+local function installHook()
+    local g = _G
+    pcall(function() if type(getgenv) == "function" then g = getgenv() end end)
+
+    -- 恢复旧 hook：脚本重载时先把上一次的 hook 拆掉，防止叠加
+    pcall(function()
+        if g.TD2_OLD_NAMECALL and type(hookmetamethod) == "function" then
+            hookmetamethod(game, "__namecall", g.TD2_OLD_NAMECALL)
         end
     end)
 
-    local oldNamecall
-    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-        local method = getnamecallmethod()
+    if type(hookmetamethod) ~= "function" then
+        hookInstalled = false
+        log("❌ 录制Hook安装失败：当前执行器没有 hookmetamethod")
+        return
+    end
 
-        if not isRecording or isPlaying
-            or (method ~= "InvokeServer" and method ~= "FireServer")
-            or typeof(self) ~= "Instance" then
-            return oldNamecall(self, ...)
-        end
+    local okInstall, err = pcall(function()
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = currentMethod()
+            hookHits = hookHits + 1
 
-        local name = self.Name
+            if not isRecording or isPlaying
+                or (method ~= "InvokeServer" and method ~= "FireServer")
+                or typeof(self) ~= "Instance" then
+                return oldNamecall(self, ...)
+            end
 
-        -- 排除反宏发包，不要记录它
-        if name == "AntiMacro" then
-            return oldNamecall(self, ...)
-        end
+            local name = self.Name
 
-        if name == "RequestPlacement" then
-            local a1, a2, a3 = ...
-            local realUid = oldNamecall(self, ...)
-            pcall(function()
-                if type(realUid) == "string" and typeof(a2) == "Vector3" then
+            -- 排除反宏发包，不要记录它
+            if name == "AntiMacro" then
+                return oldNamecall(self, ...)
+            end
+
+            if name == "RequestPlacement" then
+                local a1, a2, a3 = ...
+                local realUid = oldNamecall(self, ...)
+                pcall(function()
+                    if type(realUid) == "string" and typeof(a2) == "Vector3" then
+                        recordQueue[#recordQueue + 1] = {
+                            kind = "place",
+                            tower = tostring(a1),
+                            pos = { a2.X, a2.Y, a2.Z },
+                            rot = tonumber(a3) or 0,
+                            realUid = realUid,
+                            cash = liveCash,
+                        }
+                    end
+                end)
+                return realUid
+            end
+
+            if name == "RequestTowerUpgrade" or name == "RequestTowerSell" then
+                local a1 = ...
+                local ret = oldNamecall(self, ...)
+                pcall(function()
                     recordQueue[#recordQueue + 1] = {
-                        kind = "place",
-                        tower = tostring(a1),
-                        pos = { a2.X, a2.Y, a2.Z },
-                        rot = tonumber(a3) or 0,
-                        realUid = realUid,
+                        kind = (name == "RequestTowerUpgrade") and "upgrade" or "sell",
+                        uid  = tostring(a1),
                         cash = liveCash,
                     }
-                end
-            end)
-            return realUid
-        end
+                end)
+                return ret
+            end
 
-        if name == "RequestTowerUpgrade" or name == "RequestTowerSell" then
-            local a1 = ...
-            local ret = oldNamecall(self, ...)
-            pcall(function()
-                recordQueue[#recordQueue + 1] = {
-                    kind = (name == "RequestTowerUpgrade") and "upgrade" or "sell",
-                    uid  = tostring(a1),
-                    cash = liveCash,
+            if name == "RequestTowerAbility" or name == "UpdateAbilityAutoUse" then
+                local a1 = ...
+                local ret = oldNamecall(self, ...)
+                local packed = encodeArgs(...)
+
+                local act = {
+                    kind   = (name == "RequestTowerAbility") and "ability" or "auto_ability",
+                    method = method,
+                    args   = packed,
+                    cash   = liveCash,
+                    retUid = (type(ret) == "string" and #ret >= 32) and ret or nil,
                 }
-            end)
-            return ret
-        end
 
-        if name == "RequestTowerAbility" or name == "UpdateAbilityAutoUse" then
-            local a1 = ...
-            local ret = oldNamecall(self, ...)
-            local packed = encodeArgs(...)
+                task.delay(4, function()
+                    local uuid = tostring(a1)
+                    local towerModel = findTowerModelByUuid(uuid)
+                    if towerModel and towerModel.PrimaryPart then
+                        act.postPos = { towerModel:GetPivot().Position:GetComponents() }
+                    end
+                end)
 
-            local act = {
-                kind   = (name == "RequestTowerAbility") and "ability" or "auto_ability",
-                method = method,
-                args   = packed,
-                cash   = liveCash,
-                retUid = (type(ret) == "string" and #ret >= 32) and ret or nil,
-            }
+                pcall(function()
+                    recordQueue[#recordQueue + 1] = act
+                end)
+                return ret
+            end
 
-            task.delay(4, function()
-                local uuid = tostring(a1)
-                local towerModel = findTowerModelByUuid(uuid)
-                if towerModel and towerModel.PrimaryPart then
-                    act.postPos = { towerModel:GetPivot().Position:GetComponents() }
-                end
-            end)
-
-            pcall(function()
-                recordQueue[#recordQueue + 1] = act
-            end)
-            return ret
-        end
-
-        return oldNamecall(self, ...)
+            return oldNamecall(self, ...)
+        end)
+        g.TD2_OLD_NAMECALL = oldNamecall
+        g.TD2_HOOK_HITS = hookHits
     end)
 
-    getgenv().TD2_OLD_NAMECALL = oldNamecall
+    hookInstalled = okInstall
+    if okInstall then
+        hookMethod = "namecall"
+        log("✅ 录制Hook安装成功（__namecall，新版兼容模式）")
+    else
+        log("❌ 录制Hook安装失败：" .. tostring(err))
+    end
 end
+
+-- 立即安装（原稿漏了这一句，导致录制永远为空）
+installHook()
 
 --==================== 回放 ====================
 local function placeOnce(act)
